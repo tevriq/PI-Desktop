@@ -25,6 +25,7 @@
     "build:host-release": "cargo build --release --manifest-path ../../Cargo.toml -p host-core",
     "bundle:runtime": "pnpm -C ../../packages/agent-runtime bundle",
     "pack": "pnpm run build:deps && pnpm run build:host-release && pnpm run bundle:runtime && electron-vite build && electron-builder --dir",
+    "pack:app": ": \"${MAC_SIGNING_IDENTITY:?set MAC_SIGNING_IDENTITY to the code-signing certificate common name}\" && pnpm run build:deps && pnpm run build:host-release && pnpm run bundle:runtime && electron-vite build && electron-builder --dir -c.mac.identity=\"$MAC_SIGNING_IDENTITY\" -c.mac.forceCodeSigning=true",
     "dist": "pnpm run build:deps && pnpm run build:host-release && pnpm run bundle:runtime && electron-vite build && electron-builder --publish never",
     "dist:mac": "pnpm run build:deps && pnpm run build:host-release && pnpm run bundle:runtime && electron-vite build && electron-builder --mac --publish never",
     "dist:win": "pnpm run build:deps && pnpm run build:host-release && pnpm run bundle:runtime && electron-vite build && electron-builder --win --publish never",
@@ -75,7 +76,7 @@
     "zustand": "^5.0.15"
   },
   "build": {
-    "appId": "net.aiuo.pi-desktop",
+    "appId": "io.github.tevriq.pi-desktop",
     "productName": "PI-Desktop",
     "directories": {
       "output": "release"
@@ -83,7 +84,7 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "vastsa",
+        "owner": "tevriq",
         "repo": "PI-Desktop"
       }
     ],

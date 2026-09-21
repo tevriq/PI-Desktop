@@ -189,7 +189,15 @@ test(
         "canonical-icon",
       );
       assert.match(plist, /<string>PI-Desktop<\/string>/);
-      assert.match(plist, /<string>net\.aiuo\.pi-desktop\.dev<\/string>/);
+      // Read the expected ID from the launcher instead of restating it here:
+      // this test proves the bundle rewrite, while `pnpm check:branding` is the
+      // gate that keeps the launcher's constant aligned with the tree.
+      const devBundleId = devScriptSource.match(/DEV_BUNDLE_ID = "([^"]+)"/)?.[1];
+      assert.ok(devBundleId, "dev-electron.mjs declares DEV_BUNDLE_ID");
+      assert.ok(
+        plist.includes(`<string>${devBundleId}</string>`),
+        `branded Info.plist carries CFBundleIdentifier ${devBundleId}`,
+      );
       assert.equal(prepareMacDevelopmentBundle(options), brandedExecutable);
     } finally {
       await rm(root, { recursive: true, force: true });

@@ -91,6 +91,15 @@ test("main process registers update handlers and the auto-check lifecycle", () =
 });
 
 test("updater gates delivery mode by platform and delivery policy", () => {
+  // This fork ships with updates off outright. The platform matrix below stays
+  // intact so a build that turns them back on resolves delivery modes exactly
+  // as upstream does.
+  assert.match(
+    updaterSource,
+    /const UPDATES_DISABLED = true/,
+    "the personal fork ships with updates off",
+  );
+  assert.match(updaterSource, /if \(UPDATES_DISABLED\) return "disabled"/);
   // Packaged macOS, Windows NSIS, and Linux AppImage use in-app delivery.
   // Dev builds are disabled outright.
   assert.match(updaterSource, /if \(!isPackaged\) return "disabled"/);
@@ -125,10 +134,16 @@ test("updater gates delivery mode by platform and delivery policy", () => {
     /state\.status === "downloaded"[\s\S]*return this\.state/,
   );
   assert.match(updaterSource, /autoUpdater\.on\("error"/);
-  assert.match(
-    updaterSource,
-    /github\.com\/vastsa\/PI-Desktop\/releases/,
-    "releases fallback URL",
+  // The "view releases" fallback must track the same repository the update feed
+  // publishes to. Repointing `build.publish` at a fork while leaving this URL on
+  // another repository would send users to releases they cannot install.
+  const feedTarget = (() => {
+    const publish = JSON.parse(pkgSource).build.publish[0];
+    return `${publish.owner}/${publish.repo}`;
+  })();
+  assert.ok(
+    updaterSource.includes(`github.com/${feedTarget}/releases`),
+    "releases fallback URL matches the configured publish repository",
   );
   assert.match(
     updaterSource,
@@ -225,7 +240,15 @@ test("packaging publishes an electron-updater feed for GitHub Releases", () => {
   const pkg = JSON.parse(pkgSource);
   assert.ok(pkg.dependencies["electron-updater"], "electron-updater dependency");
   assert.equal(pkg.build.publish[0].provider, "github");
-  assert.equal(pkg.build.publish[0].owner, "vastsa");
+  // A repackaged fork must never point its update feed at the upstream
+  // repository: a local stable build would then download and silently install
+  // the upstream release over itself. `pnpm check:branding` asserts the same
+  // rule against the releases URL so the two cannot drift apart.
+  assert.notEqual(
+    `${pkg.build.publish[0].owner}/${pkg.build.publish[0].repo}`,
+    "vastsa/PI-Desktop",
+    "update feed must not target the upstream repository",
+  );
   assert.equal(pkg.build.publish[0].repo, "PI-Desktop");
   const macTargets = pkg.build.mac.target.map((entry) => entry.target);
   assert.ok(macTargets.includes("zip"), "mac zip target (Squirrel.Mac feed)");

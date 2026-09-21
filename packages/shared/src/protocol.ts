@@ -1,6 +1,16 @@
 export const PROTOCOL_VERSION = 11 as const;
 export const SCHEMA_VERSION = 16 as const;
-export const APP_ID = "net.aiuo.pi-desktop";
+// Personal-fork identity. Upstream ships `net.aiuo.pi-desktop`; this fork owns
+// its own ID so a locally built stable version can never be mistaken for, or
+// silently replaced by, the upstream release. The value is frozen by design:
+// macOS TCC grants, Keychain items, LaunchServices registration, and the
+// code-signing designated requirement are all keyed to it, so changing it
+// re-prompts for every permission.
+export const APP_ID = "io.github.tevriq.pi-desktop";
+// Deliberately identical to upstream. The Electron `userData` directory is
+// derived from `app.setName(APP_NAME)`, so keeping the name keeps the existing
+// profile (`~/Library/Application Support/PI-Desktop`) reusable in place
+// instead of orphaning it.
 export const APP_NAME = "PI-Desktop";
 export const APP_VERSION = "0.15.2-beta.2";
 

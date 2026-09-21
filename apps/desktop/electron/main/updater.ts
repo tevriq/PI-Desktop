@@ -30,7 +30,23 @@ import {
 
 const { autoUpdater } = electronUpdaterPkg;
 
-export const RELEASES_URL = "https://github.com/vastsa/PI-Desktop/releases/latest";
+// Personal fork: the release feed and the "view releases" link must both stay
+// on the fork. Pointing either at `vastsa/PI-Desktop` would let a packaged
+// local build download and silently install the upstream release over itself.
+export const RELEASES_URL = "https://github.com/tevriq/PI-Desktop/releases/latest";
+
+/**
+ * Personal fork: the update pipeline is off outright.
+ *
+ * This fork tracks upstream by rebasing and rebuilding locally, so there is no
+ * feed it should ever consume. Leaving the updater enabled would still schedule
+ * a GitHub check on every launch — and a `--dir` pack ships no `app-update.yml`,
+ * so that check can only fail and log an error.
+ *
+ * The platform matrix in `resolveUpdateMode` stays intact for the day this is
+ * flipped back on; publishing releases on the fork is the trigger for that.
+ */
+const UPDATES_DISABLED = true;
 
 const AUTO_CHECK_INITIAL_DELAY_MS = 15_000;
 const AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -58,6 +74,7 @@ export function resolveUpdateMode(
   isPackaged: boolean,
   env: NodeJS.ProcessEnv = process.env,
 ): UpdateMode {
+  if (UPDATES_DISABLED) return "disabled";
   if (!isPackaged) return "disabled";
   if (platform === "win32") {
     return env.PORTABLE_EXECUTABLE_FILE ? "manual" : "in-app";
@@ -210,7 +227,7 @@ export class AppUpdaterController {
   /** User- or schedule-triggered check. Resolves with the settled state. */
   async check(options: { manual?: boolean } = {}): Promise<UpdateState> {
     if (this.state.mode === "disabled") {
-      throw new Error("updates are disabled in development builds");
+      throw new Error("updates are disabled in this build");
     }
     if (
       this.state.status === "checking" ||

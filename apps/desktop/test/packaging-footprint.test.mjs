@@ -273,7 +273,12 @@ test("macOS DMG is a two-icon install; ZIP keeps the unsigned helper", () => {
   assert.match(macOpenFixNote, /PI-Desktop-macOS-open\.command/);
   assert.match(macOpenScript, /\/Applications\/\$\{APP_BUNDLE_NAME\}/);
   assert.match(macOpenScript, /CFBundleIdentifier/);
-  assert.match(macOpenScript, /net\.aiuo\.pi-desktop/);
+  // The helper must verify the bundle this tree actually packages, so read the
+  // expected ID from the packaging config instead of restating it here.
+  assert.ok(
+    macOpenScript.includes(`EXPECTED_BUNDLE_ID="${packageJson.build.appId}"`),
+    "the first-launch helper verifies the bundle this tree packages",
+  );
   assert.match(macOpenScript, /\/usr\/bin\/xattr -r -d com\.apple\.quarantine/);
   assert.match(macOpenScript, /\/usr\/bin\/open/);
   assert.doesNotMatch(macOpenScript, /\bsudo\s+\//);
