@@ -114,6 +114,16 @@ if (appId && helperBundleId !== appId) {
   );
 }
 
+// The About panel renders this string straight from the bundle. This fork is a
+// derivative work, so the upstream attribution has to survive an upstream merge
+// that could otherwise overwrite it with the fork owner's name.
+const copyright = desktopPackage?.build?.copyright;
+if (typeof copyright !== "string" || !copyright.includes("vastsa")) {
+  failures.push(
+    `${DESKTOP_PACKAGE_PATH}: build.copyright must keep the upstream attribution ("vastsa").`,
+  );
+}
+
 // The fork must not be reachable by the upstream update feed. `vastsa` is the
 // upstream owner; a personal fork repoints `build.publish` at its own repo.
 const UPSTREAM_MARKERS = ["vastsa/PI-Desktop", "vastsa"];

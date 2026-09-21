@@ -4,10 +4,10 @@
   "desktopName": "pi-desktop.desktop",
   "private": true,
   "description": "PI-Desktop Electron application",
-  "homepage": "https://github.com/vastsa/PI-Desktop",
+  "homepage": "https://github.com/tevriq/PI-Desktop",
   "author": {
-    "name": "vastsa",
-    "email": "hhxk666@gmail.com"
+    "name": "tevriq",
+    "email": "318064862+tevriq@users.noreply.github.com"
   },
   "main": "./out/main/index.js",
   "type": "module",
@@ -78,6 +78,7 @@
   "build": {
     "appId": "io.github.tevriq.pi-desktop",
     "productName": "PI-Desktop",
+    "copyright": "Copyright © 2026 vastsa\nFork: tevriq",
     "directories": {
       "output": "release"
     },
