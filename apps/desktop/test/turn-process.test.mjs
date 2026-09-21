@@ -179,6 +179,13 @@ test("settings writes validate the mode without changing other preferences", asy
   assert.equal(validateSettingsWrite(settings), settings);
   const infiniteSettings = { ...settings, infiniteProviderRetry: true };
   assert.equal(validateSettingsWrite(infiniteSettings), infiniteSettings);
+  // A key holding `undefined` is how this wire format spells "absent": settings
+  // persist as JSON, which cannot carry `undefined`. `settings.get` handed the
+  // renderer exactly that shape, so rejecting it made every settings write —
+  // not just this one — fail with no visible reason.
+  assert.doesNotThrow(() =>
+    validateSettingsWrite({ ...settings, infiniteProviderRetry: undefined }),
+  );
   assert.throws(
     () => validateSettingsWrite({ ...settings, infiniteProviderRetry: "yes" }),
     /infiniteProviderRetry is invalid/,

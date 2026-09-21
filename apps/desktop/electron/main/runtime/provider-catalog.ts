@@ -178,12 +178,18 @@ export function createProviderCatalogRuntime({
     const value = (
       settings && typeof settings === "object" ? settings : {}
     ) as T & { defaultCommandShell?: unknown };
+    const infiniteProviderRetry = (
+      value as T & { infiniteProviderRetry?: unknown }
+    ).infiniteProviderRetry;
     return {
       ...(value as T),
-      infiniteProviderRetry: (value as T & { infiniteProviderRetry?: unknown })
-        .infiniteProviderRetry === true
-        ? true
-        : undefined,
+      // Settings persist as JSON (`value_json`), which has no `undefined`. An
+      // explicit key holding `undefined` survives the IPC boundary as an own
+      // property, so every later write would fail validation on a value the
+      // wire format cannot even carry. An unset flag must be absent, not falsy.
+      ...(infiniteProviderRetry === true
+        ? { infiniteProviderRetry: true }
+        : {}),
       defaultCommandShell: isCommandShellId(value.defaultCommandShell)
         ? value.defaultCommandShell
         : defaultCommandShellForPlatform(process.platform),
@@ -209,6 +215,7 @@ export function createProviderCatalogRuntime({
     }
     if (
       Object.prototype.hasOwnProperty.call(value, "infiniteProviderRetry") &&
+      value.infiniteProviderRetry !== undefined &&
       typeof value.infiniteProviderRetry !== "boolean"
     ) {
       throw Object.assign(new Error("infiniteProviderRetry is invalid"), {

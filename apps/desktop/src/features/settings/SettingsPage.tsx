@@ -82,6 +82,7 @@ export function SettingsPage() {
   const settings = useAppStore((s) => s.settings);
   const version = useAppStore((s) => s.version);
   const refreshProviders = useAppStore((s) => s.refreshProviders);
+  const showToast = useAppStore((s) => s.showToast);
   const platform = (window.piDesktop?.platform ?? "darwin") as ShortcutPlatform;
 
   // Developer-only destinations (Remote Hosts) exist only while developer
@@ -179,7 +180,17 @@ export function SettingsPage() {
   const saveSettings = async (patch: Partial<AppSettings>) => {
     if (!settings) return;
     const nextSettings = { ...settings, ...patch };
-    await api.setSettings(nextSettings);
+    try {
+      await api.setSettings(nextSettings);
+    } catch (error) {
+      // Every settings row funnels through here and calls it with `void`, so an
+      // unguarded rejection left the control silently unchanged with no way for
+      // the user to learn why. Surface the host's reason instead.
+      showToast(error instanceof Error ? error.message : String(error), {
+        variant: "error",
+      });
+      return;
+    }
     useAppStore.setState({ settings: nextSettings });
     await refreshProviders();
   };

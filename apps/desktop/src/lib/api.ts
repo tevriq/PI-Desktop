@@ -416,6 +416,10 @@ export function validateSettingsWrite(settings: AppSettings): AppSettings {
   }
   if (
     Object.prototype.hasOwnProperty.call(value, "infiniteProviderRetry") &&
+    // `undefined` is what the wire format means by "absent": settings persist
+    // as JSON, so a key that cannot survive a JSON round trip must not be
+    // rejected as an invalid value.
+    value.infiniteProviderRetry !== undefined &&
     typeof value.infiniteProviderRetry !== "boolean"
   ) {
     throw Object.assign(new Error("infiniteProviderRetry is invalid"), {
