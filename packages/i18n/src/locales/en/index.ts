@@ -114,7 +114,7 @@ export const en = {
     manualHint: "Download the new version from the releases page.",
     error: "Couldn't check for updates: {{message}}",
     dismiss: "Dismiss",
-    devDisabled: "Updates are disabled in development builds.",
+    devDisabled: "Updates are disabled in this build.",
   },
   nav: {
     "pinnedSessions": "Pinned",
