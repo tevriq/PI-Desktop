@@ -6,15 +6,20 @@ import type {
 } from "@pi-desktop/shared";
 import {
   initialThinkingLevelForBinding,
-  modelIdsMatch,
+  imageGenerationBindings,
+  isImageGenerationModel,
 } from "@pi-desktop/shared";
 import { useAppStore } from "../../../../stores/app-store";
 import {
+  composerModelBinding,
   composerModelMatchesQuery,
   composerModelsForProvider,
-  composerProviderDisplayName,
-  composerProviderSearchText,
+  sameComposerModelId,
 } from "../../../../lib/composer-models";
+import {
+  providerDisplayName,
+  providerSearchText,
+} from "../../../../lib/provider-display";
 import { providerThinkingLevels } from "../../../../lib/session-thinking";
 import {
   sessionThinkingMenuLevels,
@@ -32,6 +37,9 @@ type UseComposerModelMenuOptions = {
   thinkingProvider: ProviderPublic | null | undefined;
   thinkingLevel: SessionThinkingLevel;
   controlsBlocked: boolean;
+  configureActiveSession: (configuration: {
+    mode: Mode; providerId?: string; modelId?: string; thinkingLevel: SessionThinkingLevel;
+  }) => Promise<void>;
 };
 
 export function useComposerModelMenu({
@@ -42,11 +50,17 @@ export function useComposerModelMenu({
   thinkingProvider: resolvedThinkingProvider,
   thinkingLevel,
   controlsBlocked,
+  configureActiveSession,
 }: UseComposerModelMenuOptions) {
   const providers = useAppStore((s) => s.providers);
+  const imageGeneration = useAppStore((s) => s.settings?.imageGeneration);
+  const imageGenerationModels = useAppStore((s) => s.settings?.imageGenerationModels);
+  const imageGenerationCandidates = useMemo(
+    () => imageGenerationBindings(imageGenerationModels, imageGeneration),
+    [imageGenerationModels, imageGeneration],
+  );
   const providerModels = useAppStore((s) => s.providerModels);
   const loadProviderModels = useAppStore((s) => s.loadProviderModels);
-  const configureActiveSession = useAppStore((s) => s.configureActiveSession);
   const showToast = useAppStore((s) => s.showToast);
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<ComposerMenuView>("root");
@@ -115,16 +129,17 @@ export function useComposerModelMenu({
           const models = composerModelsForProvider(
             candidate,
             providerModels[candidate.id],
+            imageGenerationCandidates,
           );
           return {
             provider: candidate,
-            providerDisplayName: composerProviderDisplayName(candidate),
-            providerSearchText: composerProviderSearchText(candidate),
+            providerDisplayName: providerDisplayName(candidate),
+            providerSearchText: providerSearchText(candidate),
             models,
           };
         })
         .filter((group) => group.models.length > 0),
-    [providers, providerModels],
+    [providers, providerModels, imageGenerationCandidates],
   );
   const queryNeedle = query.trim().toLowerCase();
   const filteredModelGroups = useMemo(
@@ -138,6 +153,7 @@ export function useComposerModelMenu({
                   model,
                   group.providerSearchText,
                   queryNeedle,
+                  composerModelBinding(group.provider, model.modelId)?.alias,
                 ),
               ),
             }))
@@ -161,7 +177,7 @@ export function useComposerModelMenu({
       flatModels.findIndex(
         (entry) =>
           entry.provider.id === provider?.id &&
-          entry.model.modelId === modelId,
+          sameComposerModelId(entry.model.modelId, modelId ?? ""),
       ),
     [flatModels, provider?.id, modelId],
   );
@@ -207,7 +223,7 @@ export function useComposerModelMenu({
   useEffect(() => {
     if (!open) return;
     requestAnimationFrame(() => {
-      if (view === "root") rootMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+      if (view === "root") rootMenuRef.current?.querySelector<HTMLButtonElement>(".composer-menu-entry")?.focus();
       if (view === "model") modelSearchRef.current?.focus();
       if (view === "thinking") thinkingListRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
       if (view === "model" && modelHighlight >= 0) {
@@ -247,6 +263,14 @@ export function useComposerModelMenu({
   const selectModel = async (candidate: ProviderPublic, nextModelId: string) => {
     thinkingQueueRef.current?.invalidate();
     await thinkingQueueRef.current?.idle();
+    if (isImageGenerationModel(
+      imageGenerationBindings(
+        useAppStore.getState().settings?.imageGenerationModels,
+        useAppStore.getState().settings?.imageGeneration,
+      ),
+      candidate.id,
+      nextModelId,
+    )) return;
     try {
       const nextModelProvider = thinkingProviderForModel(
         candidate,
@@ -254,7 +278,7 @@ export function useComposerModelMenu({
         providerModels[candidate.id],
       );
       const nextBinding = candidate.models.find((entry) =>
-        modelIdsMatch(entry.id, nextModelId),
+        sameComposerModelId(entry.id, nextModelId),
       );
       const nextThinkingLevel = activeSessionId
         ? thinkingLevelForProvider(nextModelProvider, thinkingLevel)

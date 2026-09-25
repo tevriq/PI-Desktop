@@ -22,6 +22,7 @@ import { registerPullsIpc } from "./pulls-ipc";
 import { registerScheduledIpc } from "./scheduled-ipc";
 import { registerSessionIpc } from "./session-ipc";
 import { registerSettingsIpc } from "./settings-ipc";
+import { registerConfigSyncIpc } from "./config-sync-ipc";
 import { registerSkillsIpc } from "./skills-ipc";
 import { registerAgentImportIpc } from "./agent-import-ipc";
 import { registerRemoteHostIpc } from "./remote-host-ipc";
@@ -30,8 +31,10 @@ import { registerWindowIpc } from "./window-ipc";
 import { createComposerTemplateLoader, registerWorkspaceIpc } from "./workspace-ipc";
 import { registerComposerIpc } from "./composer-ipc";
 import { registerSpeechIpc } from "./speech-ipc";
+import { registerVoiceIpc } from "./voice-ipc";
 import type { IpcRegistrar } from "./types";
 import type { createTraySessions } from "../tray-sessions";
+import type { createTaskbarUnreadBadge } from "../taskbar-unread-badge";
 
 export type RegisterIpcDependencies = {
   isQuitting: () => boolean;
@@ -39,6 +42,7 @@ export type RegisterIpcDependencies = {
   getMainWindow: () => BrowserWindow | null;
   getHost: () => HostProcess | null;
   traySessions: ReturnType<typeof createTraySessions>;
+  taskbarUnreadBadge: ReturnType<typeof createTaskbarUnreadBadge>;
   getSidecar: () => AgentSidecar | null;
   getAgentHostBridge: () => AgentHostBridge | null;
   /**
@@ -101,6 +105,8 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     currentNetworkProxy,
     applyApplicationMenuSettings,
     applyDeveloperMode,
+    applyPreventScreenSleep,
+    applyKeepAwakeWhileRunning,
     resolveEffectiveCommandShell,
     modelsDevCatalog,
     vendorOAuth,
@@ -121,6 +127,7 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     getCloseBehavior,
     markMenuRendererReady,
     traySessions,
+    taskbarUnreadBadge,
     executeNativeMenuAction,
     scheduledRunsBySession,
     isDevelopmentBuild,
@@ -152,6 +159,7 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     getPluginPanelTheme,
     isDeveloperMode,
     sendToRenderer,
+    voiceService,
   } = dependencies;
 
 
@@ -160,6 +168,7 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     const handler = async (...args: any[]) => {
       const result = await fn(...args);
       traySessions.observeInvoke(channel);
+      taskbarUnreadBadge.observeInvoke(channel);
       return result;
     };
     ipcHandlers.set(channel, handler);
@@ -257,7 +266,14 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     currentNetworkProxy,
     applyApplicationMenuSettings,
     applyDeveloperMode,
+    applyPreventScreenSleep,
+    applyKeepAwakeWhileRunning,
     resolveEffectiveCommandShell,
+  });
+  registerConfigSyncIpc({
+    registrar,
+    getHost,
+    sendToRenderer,
   });
   registerProviderIpc({
     registrar,
@@ -332,6 +348,12 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     getNpmPath: () => readNpmPath(dataDir),
     setNpmPath: (path) => writeNpmPath(dataDir, path),
     importRoot: join(dataDir, "plugins", "imported"),
+    getImportedDescriptions: async () => {
+      const currentHost = getHost();
+      if (!currentHost) throw new Error("host unavailable");
+      const { plugins: registered } = await currentHost.call<{ plugins: import("@pi-desktop/shared").PluginSummary[] }>("plugins.list");
+      return registered.flatMap(plugin => plugin.description ? [plugin.description] : []);
+    },
     loadDevPlugin: async (path) => {
       const currentHost = getHost();
       if (!currentHost) throw new Error("host unavailable");
@@ -352,7 +374,10 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     getHost,
     getSidecar,
     getAgentHostBridge,
-    cancelSessionTools: (sessionId: string, reason?: string) => plugins.cancelSessionTools(sessionId, reason),
+    cancelSessionTools: (sessionId: string, reason?: string) => {
+      plugins.cancelSessionTools(sessionId, reason);
+      userMcp.cancelSessionCalls(sessionId);
+    },
     logger,
     vendorOAuth,
     agentExtensions,
@@ -440,6 +465,10 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
   });
 
   registerSpeechIpc({ registrar, speech });
+
+  if (voiceService) {
+    registerVoiceIpc({ registrar, voiceService });
+  }
 
   registerRemoteHostIpc({ registrar });
 

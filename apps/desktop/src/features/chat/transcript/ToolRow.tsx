@@ -1,3 +1,5 @@
+import { GeneratedImages } from "./GeneratedImages";
+import "../../../styles/generated-images.css";
 import {
   Fragment,
   memo,
@@ -85,6 +87,8 @@ type ToolRowProps = {
   variant?: "default" | "topology";
   /** Open the latest detailed-mode tool unless the user took over. */
   autoOpen?: boolean;
+  /** The containing turn renders image results outside its process disclosure. */
+  imagesInTurn?: boolean;
   /** Claims the containing activity group when this row is manually used. */
   onUserInteraction?: () => void;
   /** Live delegation statuses read from the turn's lifecycle-tool rows. */
@@ -115,6 +119,7 @@ function toolRowPropsEqual(
     previous.message !== next.message ||
     previous.variant !== next.variant ||
     previous.autoOpen !== next.autoOpen ||
+    previous.imagesInTurn !== next.imagesInTurn ||
     previous.onUserInteraction !== next.onUserInteraction ||
     !subagentRunsEqual(previous.delegate, next.delegate)
   ) {
@@ -140,6 +145,7 @@ export const ToolRow = memo(function ToolRow({
   delegate,
   variant = "default",
   autoOpen = false,
+  imagesInTurn = false,
   onUserInteraction,
   delegationStatuses,
   delegationTimings,
@@ -148,8 +154,8 @@ export const ToolRow = memo(function ToolRow({
   const detailsId = useId();
   const root = useAppStore((s) => s.workspace?.path);
   const openTarget = useOpenPreviewTarget();
-  const toggleSubagentPanel = useAppStore((s) => s.toggleSubagentPanel);
-  const subagentPanel = useAppStore((s) => s.subagentPanel);
+  const openSubagentTab = useAppStore((s) => s.openSubagentTab);
+  const activeWorkPanelTabId = useAppStore((s) => s.activeWorkPanelTabId);
   const status = message.toolStatus;
   const action = getToolAction(message.toolName);
   // A run row states what the command did, not what the call around it did: an
@@ -283,7 +289,7 @@ export const ToolRow = memo(function ToolRow({
       : message.toolCallId || message.id;
   const panelOpen =
     variant === "topology" &&
-    subagentPanel?.delegationId === panelSelectionId;
+    activeWorkPanelTabId === `subagent:${panelSelectionId}`;
   const renderedOpen = variant === "topology" ? panelOpen : open;
   const inlineOpen = variant !== "topology" && open;
   const delegationTiming =
@@ -321,6 +327,27 @@ export const ToolRow = memo(function ToolRow({
     return () => window.clearInterval(id);
   }, [outcome]);
 
+  // Auto-scroll the nested `.tool-row-content` containers to their bottom
+  // while the tool is still running. These elements have `max-height: 260px`
+  // and `overflow: auto`, creating a nested scroll area that the transcript-
+  // level follow scroll cannot reach once the height cap is hit. Only scroll
+  // when the container is already near the bottom so a manual scroll-up by
+  // the user is not overridden.
+  useLayoutEffect(() => {
+    if (status !== "running" || !open) return;
+    const body = disclosure.bodyRef.current;
+    if (!body) return;
+    const containers = body.querySelectorAll<HTMLElement>(".tool-row-content");
+    for (const el of containers) {
+      const nearBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+      if (nearBottom) {
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+  }, [status, open, message, disclosure.bodyRef]);
+
+
   const statusTone =
     run === "running" || (!run && status === "running")
       ? "is-running"
@@ -343,15 +370,14 @@ export const ToolRow = memo(function ToolRow({
       {variant === "topology" ? (
         <button
           className="subagent-topology-node-header"
-          data-subagent-trigger={panelSelectionId}
           aria-expanded={panelOpen}
-          aria-controls={panelOpen ? "subagent-panel" : undefined}
+          aria-controls={panelOpen ? `work-panel-surface-subagent:${panelSelectionId}` : undefined}
           disabled={!hasDetails}
           title={[agentName || rawName, modelLabel, summary].filter(Boolean).join(" · ")}
           onClick={() => {
             if (!hasDetails) return;
             onUserInteraction?.();
-            toggleSubagentPanel(panelSelectionId);
+            openSubagentTab(panelSelectionId, agentName || undefined);
           }}
         >
           <span className="subagent-topology-avatar" aria-hidden>
@@ -388,7 +414,9 @@ export const ToolRow = memo(function ToolRow({
               </span>
             </span>
             {summary ? (
-              <span className="subagent-topology-node-summary">{summary}</span>
+              <span className="subagent-topology-node-summary" title={summary}>
+                {summary}
+              </span>
             ) : null}
             {delegate?.items.length ? (
               <span className="subagent-topology-node-steps">
@@ -523,6 +551,7 @@ export const ToolRow = memo(function ToolRow({
           <ToolDetailBlocks blocks={blocks} plain={runHead} />
         </div>
       ) : null}
+      {!imagesInTurn && <GeneratedImages message={message} />}
       {inlineOpen && delegate ? (
         <SubagentRunRows
           run={delegate}

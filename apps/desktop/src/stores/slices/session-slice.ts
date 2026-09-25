@@ -1,5 +1,4 @@
 import i18n from "i18next";
-import { prepareTranscriptAction } from "../runtime/transcript-action";
 import type {
   Mode,
   PlanProposal,
@@ -44,6 +43,7 @@ import {
   durableCoversLiveSessionMessages,
   mergeLiveSessionMessages,
 } from "../../lib/session-transcript";
+import { sessionReadLooksEmpty } from "../../lib/session-transcript-read";
 import type {
   AppState,
   DraftSessionConfiguration,
@@ -361,6 +361,32 @@ export function createSessionSlice({
 
         detail ??= await detailPromise;
         if (!runtime.navigationIntentIsCurrent(intent)) return;
+        if (detail.session && sessionReadLooksEmpty(detail.session)) {
+          // A window read that comes back empty for a session the sidebar
+          // counts as having history is not an empty conversation (#795). Ask
+          // once more, and if the transcript still reads empty keep whatever
+          // the user already has and say so, instead of committing nothing and
+          // leaving a blank pane behind.
+          const reread = await runtime.loadSessionDetail(id, {
+            messageLimit: 100,
+            contentLimit: 64 * 1024,
+          });
+          if (!runtime.navigationIntentIsCurrent(intent)) return;
+          if (reread.session && sessionReadLooksEmpty(reread.session)) {
+            const retained =
+              runtime.sessionTranscriptCache.get(id) ??
+              get().retainedTranscripts[id];
+            if (retained && retained.length > 0) {
+              commitSelection(retained, true);
+            } else {
+              get().showToast(i18n.t("chat.sessionTranscriptEmpty"), {
+                variant: "error",
+              });
+            }
+            return;
+          }
+          detail = reread;
+        }
         const historyWindow = detail.session
           ? {
               messageStart: detail.session.messageStart ?? 0,
@@ -547,10 +573,11 @@ export function createSessionSlice({
 
     forkAssistantMessage: async (messageId) => {
       const intent = runtime.beginNavigationIntent();
-      const state = await prepareTranscriptAction({ get, set }, runtime, messageId);
-      if (!state || !runtime.navigationIntentIsCurrent(intent)) return;
+      // Fork needs only the anchor id: the host reads the canonical prefix.
+      // Hydrating the source here would overwrite its concurrently streaming tail.
+      const state = get();
       const sessionId = state.activeSessionId;
-      if (!sessionId || state.runningSessions[sessionId]) return;
+      if (!sessionId || state.selectingSessionId) return;
       const message = state.messages.find((candidate) => candidate.id === messageId);
       const source = state.sessions.find((session) => session.id === sessionId);
       if (!message || message.role !== "assistant" || !source) return;
