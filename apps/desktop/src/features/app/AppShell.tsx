@@ -19,18 +19,12 @@ import { WorkPanel } from "../../components/workpanel/WorkPanel";
 import { useCopyTex } from "../../hooks/use-copy-tex";
 import { api } from "../../lib/api";
 import { PortalVisibilityProvider } from "../../lib/portal-visibility";
-import { MidAutumnEggHost } from "../mid-autumn-egg/MidAutumnEggHost";
 import { CollapsedTitlebarActions, RoutePending } from "./chrome";
 import { useAppShellRuntime } from "./useAppShellRuntime";
 
 const SettingsPage = lazy(() =>
   import("../../pages/SettingsPage").then((module) => ({
     default: module.SettingsPage,
-  })),
-);
-const PullRequestsPage = lazy(() =>
-  import("../../pages/PullRequestsPage").then((module) => ({
-    default: module.PullRequestsPage,
   })),
 );
 const ScheduledPage = lazy(() =>
@@ -112,7 +106,6 @@ export function AppShell() {
             className="app-chat-shell"
             hidden={page === "settings"}
             inert={page === "settings" ? true : undefined}
-            aria-hidden={page === "settings" ? true : undefined}
           >
             {!sidebarCollapsed || sidebarExiting ? (
               <Sidebar
@@ -246,11 +239,7 @@ export function AppShell() {
                 )}
 
                 <Suspense fallback={<RoutePending />}>
-                  {page === "pulls" ? (
-                    <div className="route-surface route-page">
-                      <PullRequestsPage />
-                    </div>
-                  ) : page === "scheduled" ? (
+                  {page === "scheduled" ? (
                     <div className="route-surface route-page">
                       <ScheduledPage />
                     </div>
@@ -305,7 +294,6 @@ export function AppShell() {
         ) : null}
         <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} />
         <ToastHost />
-        <MidAutumnEggHost ready={ready} showSplash={showSplash} />
         <ExtensionPromptHost />
         {page === "settings" ? <UpdateBanner /> : null}
       </>

@@ -18,7 +18,6 @@ import { registerNotificationIpc } from "./notification-ipc";
 import { registerPluginIpc } from "./plugin-ipc";
 import { registerPluginUiIpc } from "./plugin-ui-ipc";
 import { registerProviderIpc } from "./provider-ipc";
-import { registerPullsIpc } from "./pulls-ipc";
 import { registerScheduledIpc } from "./scheduled-ipc";
 import { registerSessionIpc } from "./session-ipc";
 import { registerSettingsIpc } from "./settings-ipc";
@@ -268,6 +267,7 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     applyDeveloperMode,
     applyPreventScreenSleep,
     applyKeepAwakeWhileRunning,
+    applyUpdatePreference: (preference) => updater.setPreference(preference),
     resolveEffectiveCommandShell,
   });
   registerConfigSyncIpc({
@@ -309,7 +309,6 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     markMenuRendererReady,
     executeNativeMenuAction,
   });
-  registerPullsIpc({ registrar, getHost });
   registerScheduledIpc({
     registrar,
     getHost,
@@ -331,7 +330,6 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     plugins,
     browserHost,
     clipboardHistory,
-    logger,
     recordPastedClipboardFiles,
     currentWorkspacePath,
     setCurrentWorkspacePath,
@@ -348,12 +346,6 @@ export function registerIpcHandlers(dependencies: RegisterIpcDependencies) {
     getNpmPath: () => readNpmPath(dataDir),
     setNpmPath: (path) => writeNpmPath(dataDir, path),
     importRoot: join(dataDir, "plugins", "imported"),
-    getImportedDescriptions: async () => {
-      const currentHost = getHost();
-      if (!currentHost) throw new Error("host unavailable");
-      const { plugins: registered } = await currentHost.call<{ plugins: import("@pi-desktop/shared").PluginSummary[] }>("plugins.list");
-      return registered.flatMap(plugin => plugin.description ? [plugin.description] : []);
-    },
     loadDevPlugin: async (path) => {
       const currentHost = getHost();
       if (!currentHost) throw new Error("host unavailable");
