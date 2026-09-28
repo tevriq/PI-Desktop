@@ -26,6 +26,7 @@ import type { AppUpdater, UpdateInfo, ProgressInfo } from "electron-updater";
 import {
   formatChangelogNotes,
   IPC,
+  type UpdateMode,
   type UpdatePreference,
   type UpdateState,
 } from "@pi-desktop/shared";
@@ -54,6 +55,28 @@ import { ManualUpdateReminderTracker } from "./manual-update-reminder";
 
 export { resolveUpdateMode } from "./update-policy";
 export type { WindowsDistribution } from "./update-policy";
+
+/**
+ * Fork gate on top of the upstream platform matrix. The matrix stays intact
+ * so a build that re-enables updates resolves delivery modes exactly as
+ * upstream does; the gate short-circuits every mode to "disabled".
+ */
+function resolveUpdateModeWithForkGate(
+  platform: NodeJS.Platform,
+  isPackaged: boolean,
+  env: NodeJS.ProcessEnv,
+  distribution?: WindowsDistribution,
+  preference?: UpdatePreference,
+): UpdateMode {
+  if (UPDATES_DISABLED) return "disabled";
+  return resolveUpdateModePolicy(
+    platform,
+    isPackaged,
+    env,
+    distribution,
+    preference,
+  );
+}
 
 const { NsisUpdater, autoUpdater } = electronUpdaterPkg;
 
@@ -124,30 +147,6 @@ export type UpdaterOptions = {
   distribution?: WindowsDistribution;
 };
 
-<<<<<<< HEAD
-export type WindowsDistribution = "installed" | "zip";
-
-export function resolveUpdateMode(
-  platform: NodeJS.Platform,
-  isPackaged: boolean,
-  env: NodeJS.ProcessEnv = process.env,
-  distribution?: WindowsDistribution,
-): UpdateMode {
-  if (UPDATES_DISABLED) return "disabled";
-  if (!isPackaged) return "disabled";
-  if (platform === "win32") {
-    return env.PORTABLE_EXECUTABLE_FILE || distribution === "zip"
-      ? "manual"
-      : "in-app";
-  }
-  if (platform === "darwin") return "in-app";
-  if (platform === "linux" && env.APPIMAGE) return "in-app";
-  // non-AppImage linux installs
-  return "manual";
-}
-
-=======
->>>>>>> upstream/main
 export class AppUpdaterController {
   private readonly logger: Logger;
   private readonly send: (channel: string, payload: unknown) => void;
@@ -238,7 +237,7 @@ export class AppUpdaterController {
     );
     this.readUpdateSettings = options.readUpdateSettings;
     this.persistLastNotifiedVersion = options.persistLastNotifiedVersion;
-    const mode = resolveUpdateModePolicy(
+    const mode = resolveUpdateModeWithForkGate(
       platform,
       isPackaged,
       this.env,
@@ -355,7 +354,7 @@ export class AppUpdaterController {
       preference,
       this.automaticSupported,
     );
-    const mode = resolveUpdateModePolicy(
+    const mode = resolveUpdateModeWithForkGate(
       this.platform,
       this.isPackaged,
       this.env,
