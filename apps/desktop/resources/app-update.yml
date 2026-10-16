@@ -1,0 +1,4 @@
+provider: github
+owner: tevriq
+repo: PI-Desktop
+updaterCacheDirName: '@pi-desktopdesktop-updater'

@@ -57,6 +57,7 @@ const calls = {
 };
 
 const state = {
+  sessions: [],
   workspace: { path: "C:/project" },
   activeSessionId: "session-1",
   pluginViews: [{ pluginId: "pi.file-manager", viewId: "manager" }],
@@ -65,6 +66,13 @@ const state = {
   openWorkPanelTab: (tab) => calls.tabs.push(tab),
   showToast: (...args) => calls.toasts.push(args),
 };
+const useAppStore = Object.assign(
+  (selector) => selector(state),
+  {
+    getState: () => state,
+    setState: (update) => Object.assign(state, update),
+  },
+);
 
 let nextMatch = null;
 let revealFails = false;
@@ -91,13 +99,19 @@ Object.defineProperty(globalThis, "navigator", {
 const translate = () => ({
   t: (key, values) => `${key}:${values?.name ?? ""}`,
 });
+const sharedPackage = await import("@pi-desktop/shared");
 
 const previewTarget = loadModule("../src/hooks/use-preview-target.ts", {
   react: React,
   "react-i18next": { useTranslation: translate },
-  "../stores/app-store": { useAppStore: (selector) => selector(state) },
+  "@pi-desktop/shared": sharedPackage,
+  "../stores/app-store": { useAppStore },
+  "./use-chat-session-capability": { useChatSessionCapability: () => true },
+  "../lib/remote-session-safety": loadModule("../src/lib/remote-session-safety.ts", {}),
+  "../plugins/renderer-slots/use-slots": { useSlotSessionId: () => "" },
   "../lib/api": {
     api: {
+      listPluginViews: async () => state.pluginViews,
       fsResolveRef: async (ref) => {
         calls.resolved.push(ref);
         return { match: nextMatch };
@@ -108,9 +122,21 @@ const previewTarget = loadModule("../src/hooks/use-preview-target.ts", {
       },
     },
   },
-  "../lib/chat-links": loadModule("../src/lib/chat-links.ts", {}),
+  "../lib/chat-links": loadModule("../src/lib/chat-links.ts", {
+    "@pi-desktop/shared": sharedPackage,
+    "./chat-link-scanner.ts": loadModule("../src/lib/chat-link-scanner.ts", {
+      "./render-diagnostics.ts": { beginRenderDiagnostic: () => () => {} },
+    }),
+    "./render-diagnostics.ts": { beginRenderDiagnostic: () => () => {} },
+  }),
   "../lib/open-http-url": { openHttpUrl: (...args) => calls.urls.push(args) },
   "../lib/work-panel-tabs": loadModule("../src/lib/work-panel-tabs.ts", {}),
+});
+
+const nativeCapability = loadModule("../src/hooks/use-chat-session-capability.ts", {
+  "../lib/remote-session-safety": loadModule("../src/lib/remote-session-safety.ts", {}),
+  "../plugins/renderer-slots/use-slots": { useSlotSessionId: () => "" },
+  "../stores/app-store": { useAppStore },
 });
 
 const { useChatFileMenu, useChatFileMenuItems } = loadModule(
@@ -128,6 +154,7 @@ const { useChatFileMenu, useChatFileMenuItems } = loadModule(
       }),
     },
     "./use-preview-target": previewTarget,
+    "./use-chat-session-capability": nativeCapability,
   },
 );
 
@@ -345,9 +372,11 @@ test("every transcript surface that names a file opens that item", () => {
     /const \{ fileMenu, openFileMenu, closeFileMenu \} = useChatFileMenu\(\)/,
   );
   assert.match(shared, /onContextMenu=\{\(event\) => openFileMenu\(event, \{ path \}\)/);
+  // An image attachment is the same chip as any other attachment now, so that
+  // chip carries the file menu and the shared preview card hangs off it.
   assert.match(
     shared,
-    /onContextMenu=\{\(event\) => openFileMenu\(event, \{ path: attachment\.ref \}\)/,
+    /<ImageHoverCard src=\{dataUrl\} anchor=\{anchor\} onDismiss=\{dismiss\} \/>/,
   );
   assert.match(shared, /<ContextMenu state=\{fileMenu\} onClose=\{closeFileMenu\} \/>/);
   // A tool row's summary and a tool result's file and match lists name files
@@ -366,12 +395,15 @@ test("every transcript surface that names a file opens that item", () => {
   // Inline code, a file link, and a local image each hand their own reference
   // to that surface; `./` and `../` keep the markdown base beside the path.
   assert.match(markdown, /openFileMenu\(event, \{ path: text \?\? target\.path, baseDir \}\)/);
-  assert.match(markdown, /openFileMenu\(event, \{ path: rel, baseDir \}\)/);
+  assert.match(markdown, /openFileMenu\(event, \{ path: ref, baseDir \}\)/);
   assert.match(markdown, /openFileMenu\(event, \{ path: localRef, baseDir \}\)/);
   assert.match(markdown, /onContextMenu=\{onLocalContextMenu\}/);
   // A local image that cannot be shown inline keeps a chip, and both carry the
-  // menu only when the reference actually resolved to a file.
-  assert.match(markdown, /const onLocalContextMenu =\s*localRef && openFileMenu/);
+  // menu only when local tools are allowed and the reference resolved to a file.
+  assert.match(
+    markdown,
+    /const onLocalContextMenu =\s*localToolsAllowed && localRef && openFileMenu/,
+  );
 });
 
 test("a URL never reaches the reveal", () => {
@@ -396,4 +428,14 @@ test("the reference labels ship in the catalogs the menu reads", () => {
   assert.match(zhCN, /fileRevealFailed: "无法在文件夹中打开该文件。"/);
   assert.match(zhCN, /copyFullPath: "复制完整地址"/);
   assert.match(zhCN, /copyRelativePath: "复制相对地址"/);
+});
+
+test("remote workspace references retain copy actions but never offer local OS reveal", () => {
+  const before = state.sessions;
+  state.sessions = [{ id: state.activeSessionId, remoteWorkspace: { hostKey: "ssh", path: "/work/app" } }];
+  let items;
+  function Harness() { items = useChatFileMenuItems()({ path: "README.md" }); return null; }
+  renderToStaticMarkup(React.createElement(Harness));
+  assert.deepEqual(items.map(item => item.id), ["copy-full-path", "copy-relative-path"]);
+  state.sessions = before;
 });

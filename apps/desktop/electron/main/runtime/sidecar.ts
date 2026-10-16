@@ -7,7 +7,10 @@ import {
   classifySidecarCrash,
   sidecarCrashErrorCode,
 } from "@pi-desktop/agent-runtime";
-import { loadBuiltinSkillBody } from "../builtin-skills";
+import {
+  assertBuiltinSkillEnabled,
+  loadBuiltinSkillBody,
+} from "../builtin-skills";
 import { createImageGenerationTool } from "../services/image-generation-service";
 import { registerPluginDevTools } from "../plugin-dev-tools";
 import { resolveLocalFile } from "../browser-view";
@@ -24,6 +27,7 @@ import type { PluginRuntime } from "../plugin-runtime";
 import type { RuntimeState } from "./context";
 import type { FinishTurn } from "./plans";
 import { formatSkillToolContent, type LoadedSkillDocument } from "../skill-document";
+import { currentSystemProxyRelayUrl } from "../network-proxy";
 
 export type SidecarRuntimeDependencies = {
   runtimeState: RuntimeState;
@@ -59,6 +63,7 @@ export type SidecarRuntimeDependencies = {
     projectPath: string | null,
   ) => Promise<LoadedSkillDocument | null>;
   activeUserSkills: (projectPath: string | undefined) => Promise<any[]>;
+  disabledBuiltinSkills: () => Promise<string[]>;
   pluginActiveInProject: (pluginId: string, projectPath: string | null | undefined) => boolean;
   currentNetworkProxy: () => any;
 };
@@ -89,6 +94,7 @@ export function createSidecarRuntime({
   sessionProjects,
   loadUserSkillBody,
   activeUserSkills,
+  disabledBuiltinSkills,
   pluginActiveInProject,
   currentNetworkProxy,
 }: SidecarRuntimeDependencies): {
@@ -113,6 +119,7 @@ export function createSidecarRuntime({
       startedAt: number;
       turnId?: string;
       parentToolCallId?: string;
+      nestedParentToolCallId?: string;
       agentName?: string;
     }
   >();
@@ -197,6 +204,7 @@ export function createSidecarRuntime({
           startedAt: envelope.ts,
           turnId: envelope.turnId,
           parentToolCallId: envelope.parentToolCallId,
+          nestedParentToolCallId: envelope.nestedParentToolCallId,
           agentName: envelope.agentName,
         });
       } else if (event.type === "tool_end") {
@@ -219,6 +227,7 @@ export function createSidecarRuntime({
             turnId: envelope.turnId ?? started?.turnId,
             toolCallId: event.toolCallId,
             parentToolCallId: started?.parentToolCallId,
+            nestedParentToolCallId: started?.nestedParentToolCallId,
             agentName: started?.agentName,
             ...(resultCode ? { code: resultCode } : {}),
             data: {
@@ -245,6 +254,36 @@ export function createSidecarRuntime({
         } satisfies AgentEventEnvelope);
       }
     }
+    if (method === "agent.diagnostic") {
+      const diagnostic = params as {
+        kind?: unknown;
+        sessionId?: unknown;
+        turnId?: unknown;
+        requestId?: unknown;
+        data?: unknown;
+      };
+      if (
+        (diagnostic.kind === "compaction_failure" || diagnostic.kind === "compaction_shape") &&
+        typeof diagnostic.sessionId === "string" &&
+        typeof diagnostic.requestId === "string" &&
+        diagnostic.data && typeof diagnostic.data === "object"
+      ) {
+        const isFailure = diagnostic.kind === "compaction_failure";
+        logger.app(
+          "session",
+          isFailure ? "warn" : "info",
+          isFailure ? "context compaction failed" : "context compaction request shape",
+          {
+            sessionId: diagnostic.sessionId,
+            ...(typeof diagnostic.turnId === "string" ? { turnId: diagnostic.turnId } : {}),
+            requestId: diagnostic.requestId,
+            event: isFailure ? "session.compaction.failed" : "session.compaction.request_shape",
+            data: diagnostic.data,
+          },
+        );
+      }
+      return;
+    }
     // permissions.request reaches the renderer once, via wireHost; the
     // sidecar no longer relays it (agent-sidecar.setHost filters it out).
   });
@@ -262,6 +301,7 @@ export function createSidecarRuntime({
         turnId: tool.turnId,
         toolCallId: tool.toolCallId,
         parentToolCallId: tool.parentToolCallId,
+        nestedParentToolCallId: tool.nestedParentToolCallId,
         agentName: tool.agentName,
         data: {
           toolName: tool.toolName,
@@ -324,20 +364,40 @@ export function createSidecarRuntime({
 
   const s = new AgentSidecar((text) => logger.child("agent", text));
   wireSidecar(s);
-  s.setProjectInstructionResolver(async ({ projectPath, path }) => {
+  // The directory a session's file tools work in: its isolated worktree
+  // (ADR 0329), resolved by host-core from its own registry, or its project.
+  const sessionFileRoot = async (sessionId: string): Promise<string | null> => {
+    const host = runtimeState.host;
+    if (!host) return null;
+    const res = await host.call<{
+      session: { projectPath?: string; worktree?: unknown } | null;
+    }>("session.get", { id: sessionId });
+    if (res?.session?.worktree) {
+      const location = await host.call<{ path?: string }>("worktree.location", { sessionId });
+      return location.path?.trim() || null;
+    }
+    return res?.session?.projectPath?.trim() || null;
+  };
+  s.setProjectInstructionResolver(async ({ sessionId, projectPath, path }) => {
     // The root is registered by Electron main from the host-owned session
     // record. The sidecar can provide a target path, never an arbitrary root.
-    const instructions = await loadInstructionChain(projectPath, path);
+    const instructions = projectPath?.startsWith("remote-project:")
+      ? await loadInstructionChain(undefined) : await loadInstructionChain(projectPath, path);
     if (!projectPath || !runtimeState.host) return instructions;
+    // An isolated session registers its worktree as the root (ADR 0329); the
+    // group context stays keyed by the session's project, and the group's
+    // other roots are not advertised inside the worktree.
+    const project = sessionProjects.get(sessionId) ?? projectPath;
+    const isolated = project !== projectPath;
     try {
       const result = await runtimeState.host.call<{
         context?: {
           roots?: Array<{ path?: string }>;
           instructions?: string;
         } | null;
-      }>("project.group.context", { path: projectPath });
+      }>("project.group.context", { path: project });
       const roots = result.context?.roots ?? [];
-      const rootGuide = roots.length > 1
+      const rootGuide = !isolated && roots.length > 1
         ? [
             `Primary root: ${roots[0]?.path ?? projectPath}`,
             ...roots.slice(1).map((root) => `Additional root: ${root.path ?? ""}`),
@@ -454,12 +514,14 @@ export function createSidecarRuntime({
     }
 
     await modelsDevCatalog.ensureLoaded();
+    modelsDevCatalog.configureAccount(provider);
     let catalogModelConfig: Parameters<typeof modelConfigWithBinding>[0];
     if (isVendorAccount) {
       const vendorBinding = await vendorOAuth.bindingFor(provider.id, modelId);
       if (!vendorBinding) throw new Error(`vendor "${provider.name}" does not offer "${modelId}"`);
       catalogModelConfig =
         vendorBinding.modelConfig ?? catalogModelConfigFor(modelsDevCatalog, {
+          providerId: provider.id,
           vendorKey: provider.vendorKey,
           baseUrl: vendorBinding.baseUrl ?? provider.baseUrl,
           apiStyle: vendorBinding.apiStyle ?? provider.apiStyle,
@@ -467,6 +529,7 @@ export function createSidecarRuntime({
         });
     } else {
       catalogModelConfig = catalogModelConfigFor(modelsDevCatalog, {
+        providerId: provider.id,
         vendorKey: provider.vendorKey,
         baseUrl: provider.baseUrl,
         apiStyle: provider.apiStyle,
@@ -497,6 +560,13 @@ export function createSidecarRuntime({
   s.setLocalTool("GenerateImages", createImageGenerationTool({
     dataDir,
     getHost: () => runtimeState.host,
+    resolveAuth: providerId => vendorOAuth.resolveAuth(providerId),
+    resolveImageModel: async (provider, modelId) => {
+      await modelsDevCatalog.ensureLoaded();
+      return modelsDevCatalog.findModelOfType("image", {
+        providerId: provider.id, vendorKey: provider.vendorKey, baseUrl: provider.baseUrl, modelId,
+      });
+    },
     // Fake-IP tolerance belongs to the network policy, not to the proxy switch.
     allowFakeIp: () => relaxedNetworkPolicyEnabled(),
   }));
@@ -509,30 +579,25 @@ export function createSidecarRuntime({
         content: "BrowserPreview: `path` is required.",
       };
     }
-    let root: string | null = null;
+    let roots: readonly string[];
     try {
-      const res = (await runtimeState.host?.call("session.get", { id: sessionId })) as
-        | { session: { projectPath?: string } | null }
-        | undefined;
-      root = res?.session?.projectPath?.trim() || null;
-    } catch {
-      root = null;
-    }
-    if (!root) {
+      roots = await browserHost.getFileRoots(sessionId);
+    } catch (error) {
       return {
         ok: false,
         isError: true,
-        content: "BrowserPreview: no workspace is open.",
+        content: `BrowserPreview: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
-    if (!resolveLocalFile(raw, root)) {
+    const file = roots.map((root) => resolveLocalFile(raw, root)).find((path) => path !== null);
+    if (!file) {
       return {
         ok: false,
         isError: true,
-        content: `BrowserPreview: "${raw}" does not resolve to an existing file inside the workspace.`,
+        content: `BrowserPreview: "${raw}" does not resolve to an existing file inside this session's project or scratch directory.`,
       };
     }
-    const preview = await browserHost.previewWorkspaceFile(sessionId, raw, root);
+    const preview = await browserHost.previewFile();
     if (!preview.ok) {
       return {
         ok: false,
@@ -542,7 +607,7 @@ export function createSidecarRuntime({
     }
     sendToRenderer(IPC.event.browserPreview, {
       sessionId,
-      path: raw,
+      path: file,
     });
     return {
       ok: true,
@@ -563,6 +628,7 @@ export function createSidecarRuntime({
     }
     const projectPath = sessionProjects.get(sessionId) ?? null;
     try {
+      await assertBuiltinSkillEnabled(id, disabledBuiltinSkills);
       // Bundled skills answer first; they are not owned by any plugin. A user
       // skill is looked up next, and only then a plugin's — the ids cannot
       // collide, since a plugin skill id always carries a `<pluginId>/` prefix.
@@ -597,10 +663,7 @@ export function createSidecarRuntime({
   registerPluginDevTools(s, {
     resolveWorkspace: async (sessionId) => {
       try {
-        const res = (await runtimeState.host?.call("session.get", { id: sessionId })) as
-          | { session: { projectPath?: string } | null }
-          | undefined;
-        return res?.session?.projectPath?.trim() || null;
+        return await sessionFileRoot(sessionId);
       } catch {
         return null;
       }
@@ -630,6 +693,7 @@ export function createSidecarRuntime({
     hostBinary: runtimeState.host?.binaryPath,
     dataDir,
     networkProxy: currentNetworkProxy(),
+    systemProxyRelayUrl: currentSystemProxyRelayUrl(),
   });
   logger.app("runtime", "info", "agent sidecar configured");
   };

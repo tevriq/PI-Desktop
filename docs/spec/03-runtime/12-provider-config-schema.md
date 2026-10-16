@@ -196,6 +196,15 @@ non-secret `accountLabel`, and a `connected` flag. The custom-provider dialog
 does not edit or delete OAuth rows; the Vendor accounts card calls
 `providers.delete` for the selected row.
 
+Plugin-owned OAuth rows use the same `authKind` and encrypted secret reference,
+but keep the manifest-owned row id `plugin:<pluginId>:<declaredId>`. The
+`provider.oauth` callback handles login and refresh for that row, and one
+credential is stored per declared provider contribution. Signing out deletes
+only its OAuth secret; the provider row remains until the plugin is disabled,
+uninstalled, or removes the declaration. Plugin-owned rows and their secrets
+are excluded from portable configuration capture because the plugin manifest
+recreates the row on the destination host.
+
 `models` is the provider's selected model binding array. Each binding owns its
 context/output limits and explicit thinking configuration. Published catalog
 levels seed a newly selected known model, but the binding may enable any
@@ -257,7 +266,8 @@ normal secret-store path.
 OpenCode Go (and any `opencode.ai` host) requires a stable
 `x-opencode-session` header on LLM requests. Agent-runtime sends that header
 plus `x-opencode-client: pi-desktop` and `User-Agent: pi-desktop/<APP_VERSION>`
-on session turns, subagent turns, prompt enhancement, and plugin one-shots.
+on session turns, subagent turns, plugin-owned prompt enhancement, and other
+plugin one-shots.
 Caller-supplied headers override the client and User-Agent values; a missing
 or empty session header is always restored from the conversation id.
 
@@ -265,7 +275,8 @@ or empty session header is always restored from the conversation id.
 omitted, or update `{}` keeps the adapter default (pi-ai's `pi (…)` string,
 Anthropic OAuth's `claude-cli/<version>`, or OpenCode's
 `pi-desktop/<APP_VERSION>`). A non-empty map is last-writer on that row's
-outbound HTTP — session turns, subagents, prompt enhancement, plugin one-shots,
+outbound HTTP — session turns, subagents, plugin one-shots (including
+plugin-owned prompt enhancement),
 `/models` discovery (including unsaved form values), connection tests, and
 OAuth token refresh. A fetch wrapper is the last writer so Codex and the
 Anthropic SDK cannot overwrite it; pi-ai's Google adapters receive the same
@@ -382,7 +393,11 @@ Presets only prefill form defaults; they are not a closed world.
 | bedrock | bedrock | aws_sdk_default | no |
 | ollama | openai_compatible | none | yes |
 | lmstudio | openai_compatible | none | yes |
-| custom | openai_compatible | api_key_and_base_url | yes |
+| custom | openai_compatible | api_key_and_base_url by default; `none` when the endpoint needs no authentication | yes |
+
+The custom endpoint form keeps API-key authentication as its default and lets
+the user explicitly select `authKind: "none"` for endpoints that accept
+unauthenticated requests. Named cloud presets retain their declared auth kind.
 
 ### Fixed API-style presets
 
@@ -394,7 +409,8 @@ Presets only prefill form defaults; they are not a closed world.
 
 These rows are created from the add-provider **Service** select, not from a
 new protocol. They remain `type: "openai_compatible"`. The common path is
-Service + API key; the published host is a summary, and the display name is
+Service + API key; the summary shows the endpoint host and path so subscription
+routes remain visible (wrapping when needed), and the display name is
 editable in Advanced. Custom endpoint shows Name beside Base URL, then API key
 beside API format. `vendorKey` is the models.dev provider key.
 
@@ -427,6 +443,26 @@ Qwen Token Plan (`alibaba-token-plan`, aliases `qwen-token-plan` /
 `qwen-token-plan-individual`), Qwen Token Plan (China)
 (`alibaba-token-plan-cn`, alias `qwen-token-plan-cn`), Xiaomi Token Plan
 (`xiaomi-token-plan-cn` / `-ams` / `-sgp`).
+
+StepFun Plan uses the `stepfun-plan` preset with catalog vendor key
+`stepfun-step-plan`, Base URL `https://api.stepfun.com/step_plan/v1`, and
+`anthropic_messages`. The existing Anthropic adapter removes the trailing
+`/v1` before the SDK appends `/v1/messages`, preserving the subscription path.
+Step 5 Preview capabilities come from the bundled first-party models.dev
+record; no supplemental catalog or hard-coded limits are needed. The ordinary
+StepFun API and existing custom-provider rows retain their configuration.
+
+Its model list is asked differently from its chat route: this deployment
+publishes `GET /step_plan/v1/models` to `Authorization: Bearer`, so the preset
+declares `discoveryStyle: "openai_models"` — a declared model-list style, not
+one derived from `anthropic_messages`. Chat stays on Anthropic Messages while
+the model-list probe and the connection test both send a Bearer token.
+
+A declared style is a statement about the endpoint, not about one spelling of
+it: it holds for the base URL and for a URL pasted with an operation suffix
+(`/models`, `/messages`), which is stripped before resolution. Pasting back the
+address the settings dialog itself offered therefore keeps the same model-list
+authentication.
 
 Zhipu / Z.AI Completions requests still receive `thinkingFormat: "zai"` and
 `zaiToolStream: true`. pi-ai `zai-coding-cn` remains an alias of
@@ -594,13 +630,16 @@ The canonical DDL lives in [04-data-storage](04-data-storage.md) (D086). Summary
 ### `providers.listModels`
 - renderer IPC in: `{ providerId, source?: "cache"|"refresh" }`; `cache`
   returns the durable catalog without provider network access, while `refresh`
-  reads the local models.dev snapshot and runs provider endpoint discovery only for IDs absent from it
+  probes the provider for selectable IDs and decorates the answer with the
+  local models.dev snapshot; the catalog list is used only when discovery has
+  no usable answer
 - host RPC in: `{ providerId?: string }`; reads only the Rust-owned `models`
   table
 - for an `authKind: "oauth"` row Electron main reads the signed-in account's
-  model list (see `03-runtime/11-provider-model-system.md`) instead of the
-  pinned catalog. pi-ai `models.getAvailable` is used only when that request
-  fails. Each returned model carries the apiStyle its wire API implies.
+  model IDs (see `03-runtime/11-provider-model-system.md`) instead of the
+  published catalog. pi-ai `models.getAvailable` may provide fallback IDs only
+  when that request fails; it never supplies chat-model limits or capabilities.
+  Each returned model carries the apiStyle its wire API implies.
   `openai-codex` calls `GET {base}/codex/models`, so an account id such as
   `gpt-6-luna` appears without a pin update; models.dev does not invent those
   IDs. Copilot still hides models the account did not enable.
@@ -671,6 +710,11 @@ The canonical DDL lives in [04-data-storage](04-data-storage.md) (D086). Summary
 11. Legacy `supportedThinkingLevels`, when present, must still validate as an
   array of canonical thinking levels but has no runtime effect
 
+User-created custom endpoints may use `authKind=none`. Updating an editable
+provider to this auth kind removes its API-key secret from the secret store and
+clears `secret_ref`; OAuth credentials use their separate lifecycle. The
+runtime sends no API-key or Authorization credential for a `none` provider.
+
 ## 11. Secret ref format
 
 ```text
@@ -737,11 +781,13 @@ registry's `/api/paas/v4` sibling. The only generic extra path is `/v1` for an
 unknown OpenAI-compatible endpoint. Every published model-list shape is read —
 `data[].id`, Google's `models[].name`, and the `models[].slug` rows Zhipu's
 OpenAI Responses endpoint returns — so an endpoint that answers is never treated
-as empty. Connection testing reuses
-the same request builder, so "the model list loaded" and "the connection test
-passed" always describe the same URL, auth header and format. Anthropic-style
-endpoints that return 404 because they intentionally publish no model list may
-instead pass connection testing through a same-origin `OPTIONS /v1/messages`
+as empty. Connection testing reuses the same request builder, so "the model list
+loaded" and "the connection test passed" always describe the same URL, auth
+header and format — including a deployment whose model list authenticates
+differently from its chat route, where the endpoint's declared model-list style
+is what both surfaces use. Anthropic-style endpoints that return 404 because
+they intentionally publish no model list may instead pass connection testing
+through a same-origin `OPTIONS /v1/messages`
 route probe; this proves reachability without sending credentials or a billable
 model request, while model IDs remain manual.
 

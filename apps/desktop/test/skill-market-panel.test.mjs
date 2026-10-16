@@ -82,14 +82,19 @@ test("a failed preview is reported instead of silently disabling install", () =>
   // no way to try again. The preview-before-save gate itself is intentional and
   // stays — what changes is that a failure is now legible and recoverable.
   assert.match(panel, /setPreviewFailure\(\{/);
-  assert.match(panel, /kind: classifySkillMarketFailure\(error\)/);
+  assert.match(panel, /const kind = classifySkillMarketFailure\(error\)/);
   assert.match(panel, /detail: skillMarketFailureDetail\(error\)/);
   assert.match(panel, /settings\.sklm\.previewError/);
   assert.match(panel, /settings\.sklm\.previewPolicyError/);
   assert.match(panel, /settings\.sklm\.proxyHint/);
   assert.match(panel, /settings\.sklm\.failureDetail/);
   assert.match(panel, /settings\.sklm\.retryPreview/);
-  assert.match(panel, /role="alert"/);
+  // Announced once, by the toast host, with the classified copy: the sheet
+  // keeps the hints, the host's detail and its retry rather than an error row.
+  assert.match(
+    panel,
+    /showToast\(\s*t\(\s*kind === "policy"[\s\S]{0,400}\{ variant: "error" \}/,
+  );
   assert.match(panel, /disabled=\{installing \|\| documentBody === null \|\| documentTooLarge\}/);
   assert.match(panel, /const retryPreview = \(\) => \{/);
   assert.match(panel, /if \(installFor\) loadDocument\(installFor\)/);
@@ -107,6 +112,14 @@ test("the market list explains a policy refusal instead of a bare unreachable", 
   assert.match(panel, /queryError: skillMarketFailureDetail\(error\)/);
 });
 
+test("failed and partial skill catalog searches can be retried", () => {
+  assert.match(panel, /const \[catalogRetry, setCatalogRetry\] = useState\(0\)/);
+  assert.match(panel, /\[search, sources, catalogRetry\]/);
+  assert.match(panel, /const retryCatalog = \(\) => \{/);
+  assert.match(panel, /settings\.sklm\.retryCatalog/);
+  assert.match(panel, /setRemote\(\(current\) => \(\{ \.\.\.current, status: "loading" \}\)\)/);
+});
+
 test("a resolver with no answer is explained as that, not as an address check", () => {
   // Issue #419, second round: one `policy` bucket meant a local resolver that
   // answered nothing produced the same sentence as an address the guard had
@@ -117,15 +130,24 @@ test("a resolver with no answer is explained as that, not as an address check", 
     /if \(hasUnresolvedFailure\(remote\.failureKinds\)\) return t\("settings\.sklm\.remoteErrorUnresolved"\)/,
   );
   assert.match(panel, /settings\.sklm\.dnsHint/);
-  assert.match(panel, /previewFailure\.kind === "unresolved"/);
-  assert.match(panel, /settings\.sklm\.previewResolveError/);
+  assert.match(
+    panel,
+    /kind === "unresolved"\s*\? "settings\.sklm\.previewResolveError"/,
+  );
+  // The reason itself is announced by the toast host: the sheet keeps its
+  // recovery hints, its retry control and the host's own detail, and has no
+  // error row left occupying the preview field.
+  assert.match(panel, /showToast\(\s*t\(\s*kind === "policy"/);
+  assert.doesNotMatch(panel, /sklm-note is-error/);
+  assert.match(panel, /onClick=\{retryPreview\}/);
   // The refusal names the host it is about, not just the source label: a policy
   // refusal is a statement about one address.
   assert.match(panel, /settings\.sklm\.failureSourceHost/);
   assert.match(panel, /remote\.failureDetails\[name\]\?\.host/);
   // And the host reaches the state from the IPC result.
   assert.match(panel, /failureDetails: result\.failureDetails \?\? \{\}/);
-  assert.match(panel, /failureDetails: current\.failureDetails/);
+  // The retry loading state preserves the last host details until the request resolves.
+  assert.match(panel, /setRemote\(\(current\) => \(\{ \.\.\.current, status: "loading" \}\)\)/);
 });
 
 test("a proxy fake-IP gets its own copy and names the address it came from", () => {
@@ -137,8 +159,10 @@ test("a proxy fake-IP gets its own copy and names the address it came from", () 
     panel,
     /if \(hasFakeIpFailure\(remote\.failureKinds\)\) return t\("settings\.sklm\.remoteErrorFakeIp"\)/,
   );
-  assert.match(panel, /previewFailure\.kind === "fake-ip"/);
-  assert.match(panel, /settings\.sklm\.previewFakeIpError/);
+  assert.match(
+    panel,
+    /kind === "fake-ip"\s*\? "settings\.sklm\.previewFakeIpError"/,
+  );
   assert.match(panel, /settings\.sklm\.fakeIpHint/);
   assert.match(panel, /settings\.sklm\.fakeIpHintPlain/);
   // The hint names what actually happened: which host, and which address the
@@ -167,6 +191,7 @@ test("every shipped locale carries the new skill market strings", async () => {
     "fakeIpHintPlain",
     "failureDetail",
     "retryPreview",
+    "retryCatalog",
     "remoteErrorPolicy",
     "remoteErrorUnresolved",
     "remoteErrorFakeIp",

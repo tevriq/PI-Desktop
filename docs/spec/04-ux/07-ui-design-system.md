@@ -16,7 +16,8 @@ The desktop shell targets a 1:1 visual match with the local Codex desktop client
 1. A consumer-brand identity system with vibrant gradients or playful illustrations
 2. A full component library spec (that is [08-component-spec.md](08-component-spec.md))
 3. Custom font services or CDN font hosting — use local bundling
-4. Complex theme marketplace or user-customizable color palettes (MVP: system/light/dark only)
+4. An interactive color-palette editor; built-in system/light/dark choices and
+   plugin-contributed `ui.theme` entries are supported
 5. Pixel-perfect Figma handoff artifacts
 
 ## 3. Visual principles
@@ -273,6 +274,17 @@ accessible name. Running dots in task rows and related-session hover cards
 animate for two 1.6-second cycles when mounted or entering the running state,
 then remain steady until the status changes. They must not continuously
 submit frames while the rest of the window is idle.
+
+The same bound covers every idle-reachable status indicator, because any
+one of them keeps the transparent macOS window dirty and therefore
+re-composited even when nothing is happening: the permission dot on a
+session waiting for approval, the plan-mode chip in the composer toolbar,
+and the warning dot on the backend banner each play two cycles and then
+hold a steady state that carries the meaning by itself (purple fill,
+planning-tinted icon, warning fill). Only indicators that describe work in
+flight — a streaming cursor, a running tool row, a recording microphone —
+may animate for as long as that work lasts. Reduced-motion mode disables
+all of them.
 
 ### 4.6 Tailwind CSS variable stub
 
@@ -926,9 +938,10 @@ The composer renders only controls connected to the active pi session:
 - The model trigger shows only the active model ID. Its menu selects a
   configured provider/default-model pair for the active session and links to
   Agent.
-- The right toolbar exposes one combined model × reasoning trigger immediately
-  before the standalone prompt-enhancement Sparkles action and Send/Abort. The
-  trigger shows a Bot icon, the current model, and reasoning level; `off` omits
+- The right toolbar exposes one combined model × reasoning trigger. Explicitly
+  installed plugins may contribute user-invoked text actions after it; prompt
+  enhancement is not built in. The trigger shows a Bot icon, the current model,
+  and reasoning level; `off` omits
   the level text. Its single `role="menu"`
   popover opens above the trigger at `bottom: calc(100% + 8px)` and starts with
   exactly two current-value entries. When the menu lists more than one
@@ -1062,8 +1075,8 @@ Codex parity decisions (D034/D070) supersede any older value here.
 | Composer toolbar | MainChat `≥450px` | Left/right control groups stay on one row and do not shrink; mode/permission labels stay single-line and ellipsize |
 | Composer draft height | 1–7 text lines | Auto-grow; internal scroll beyond line 7 |
 | Chat message max width | 760px default band (user-resizable, min 560px) / 600px user plate | Band follows `min(pane, preferred)`; user turns stay compact |
-| Window min width | 1040px | Enforced by Electron for the whole app; opening the panel never changes native bounds |
-| Window min height | 700px | Enforced by Electron |
+| Window min width | 800px | Enforced by Electron for the whole app, capped to the current display work area (D635); opening the panel never changes native bounds |
+| Window min height | 560px | Enforced by Electron, capped to the current display work area (D635) |
 
 An open work panel is a fixed-width in-flow column inside the existing client
 area (ADR 0033 / ADR 0151). Its flex allocation comes from MainChat, but MainPane
@@ -1102,16 +1115,34 @@ header-height background behind the excluded lane without covering its controls.
 - The inner panel divider changes the panel width in the renderer. Moving it
   left takes internal space from MainChat until the 450px floor is reached, at
   which point the expanded sidebar yields; moving it right returns that space.
-  Native window edges resize only the fixed app window.
+  Window edges resize only the fixed app window.
 - Panel open and collapse change only the in-flow flex allocation. No positive
   native reservation is requested, and the panel's preferred width remains a
   renderer-local setting.
-- The outer shell keeps native edge/corner resizing enabled on every platform.
-  Frameless titlebar drag regions never replace the OS resize ownership. A
+- All platforms retain native edge/corner resizing. On Windows the main window
+  disables the frameless `WS_THICKFRAME` rim while Electron 43.6's frameless
+  hit test continues to own edge and corner resizing; no border is painted on
+  the left, right, or bottom. The Windows main window uses the global
+  `--radius-md` token (12 DIP) as its default corner request. Windows 11 and
+  later use the DWM system-rounded preference for any positive radius and a
+  square preference for radius 0; DWM chooses the actual radius and may decline
+  to round based on window style or environment. Windows builds before 22000
+  retain the existing `contentView` clip and native shape. The Windows 11 path
+  uses an opaque top-level surface, so contributed alpha colors are composited
+  over the resolved built-in theme background. A selected
+  plugin theme with `ui.window.appearance` may set `cornerRadius` to an integer
+  from 0 through 24 DIP; removing that theme restores the 12 DIP global
+  default. Corners become rectangular while maximized or fullscreen; positive
+  values on Windows 11 do not guarantee an exact DIP radius. Native window
+  background colors remain theme-owned. Electron's borderless
+  fullscreen fallback fills the display without reporting `isFullScreen()`;
+  Main tracks its state so toggling back restores the previous bounds and
+  fullscreen geometry is never persisted. Frameless titlebar drag
+  regions remain separate from window-edge resizing. A
   300ms stable-bounds settle window prevents recovery logic from competing with
   a slow pointer gesture, and normal base bounds persist 600ms after the last
-  native resize/move event. Width < 1040px or height < 700px is unsupported and
-  prevented by Electron.
+  native resize/move event. Electron enforces an 800×560 minimum, capped to the
+  current display's work area (D635); smaller sizes are unsupported.
 
 ## 11. Component foundations
 
@@ -1167,6 +1198,15 @@ padding that under the global `border-box` would leave a 12px content box for a
 | Background | bg-secondary (dark); bg-white (light) + shadow-lg |
 | Backdrop | rgba(0,0,0,0.5) with `z-dialog` |
 | Close | Escape key + X button top-right |
+
+**Shared dismissal primitive:** `OverlayBackdrop`, exported from
+`components/ui.tsx`, renders the existing backdrop `div` and accepts its normal
+HTML attributes and close callback. It forwards a backdrop click only after a
+primary pointer press and release both target that backdrop; capture-phase
+origin tracking protects text selection across content boundaries and nested
+layers. It does not prevent selection or capture the pointer. Callers retain
+busy/saving guards and their existing Escape/close controls. Presses cancelled
+by pointer cancellation or window blur cannot dismiss the surface.
 
 ### 11.5 Tabs
 
@@ -1258,12 +1298,26 @@ Implementation: `components/ui.tsx → Checkbox`.
 
 | Property | Value |
 |---|---|
-| CSS class | `.ui-checkbox` |
+| CSS classes | `.ui-checkbox` (label), `.ds-checkbox` (native input) |
 | Anatomy | `<label> → <input type="checkbox"> + <span>{label}</span>` |
-| Props | Extends `InputHTMLAttributes` (minus `type`) + `label: ReactNode` |
+| Props | Extends `InputHTMLAttributes` (minus `type` and `ref`) + `label: ReactNode`, `indeterminate?: boolean` |
+| Paint | 18px rounded square, 8px label gap, token-based checked fill and checkmark; mixed state uses a dash |
+| Interaction | Native label activation and Space toggling, visible keyboard focus, whole-label disabled treatment; native paint in forced-colors mode |
 
 Every standalone labeled checkbox **must** use `Checkbox`. Inline
 `<label><input type="checkbox"/>…</label>` is prohibited.
+
+### 11.11a SettingsDisclosure
+
+Implementation: `components/settings/SettingsDisclosure.tsx`.
+
+Use native `<details>` / `<summary>` for low-frequency settings, with one
+localized title and a decorative chevron. It accepts native details attributes,
+children and `className`; `open` can seed or update the native state. Collapsed
+content stays mounted to retain drafts but is not keyboard-reachable. The
+shared summary has a minimum 44px row, token-based hover/focus treatment and
+reduced-motion-compatible chevron feedback. Errors, progress and approvals
+must remain outside optional disclosures.
 
 ### 11.11b CheckboxGroup
 
@@ -1293,6 +1347,10 @@ Implementation: `components/settings/SettingsMenuSelect.tsx`.
 Every dropdown / option-list in Settings **must** use `SettingsMenuSelect`
 instead of the native `Select` (`<select>`) component. Native `Select`
 is reserved for non-Settings contexts where OS-level rendering is acceptable.
+
+Appearance pickers use the scaled `--ds-settings-picker-height` metric.
+`SettingsMenuSelect` triggers keep `--ds-field-height` so they align with
+adjacent form inputs; dense surfaces may override that metric locally.
 
 
 ## 12. State patterns
@@ -1422,11 +1480,10 @@ is reserved for non-Settings contexts where OS-level rendering is acceptable.
   per D092, the content cards fill the pane width available from the current
   window instead of retaining D070's fixed 720px cap — the earlier in-shell
   200px rail and broad grouped directory are superseded
-- **Import**: four kinds (sessions / models / skills / MCP) behind one
-  page-scale segmented switcher, composed like the agent capability pages: a
-  quiet pre-scan next-action state per kind, one toolbar per kind (select-all
-  with both counts, the kind's own option, re-scan, import selected), and one
-  list whose group headers are quiet label lines and whose candidates are
-  individual tiles. No per-kind scan card, no tinted group band, no second
-  copy of the settings row scaffold
+- **Inline import workbenches**: model configuration, external skills, and
+  external MCP scans live in Models, Skills, and MCP respectively. Each page
+  exposes an explicit scan action and an inline selection workbench; opening a
+  workbench never scans automatically. Skills and MCP imports follow the
+  selected global/project scope. Settings has no session-import destination;
+  plugins retain session ingestion through their existing API.
 - Light destination cards use white elevated plates (not flat gray fills)

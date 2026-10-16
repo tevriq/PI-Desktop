@@ -61,6 +61,48 @@ export class PanelSenders {
  */
 export const PLUGIN_PAGE_CLOSE_SETTLE_MS = 1_000;
 
+/**
+ * How long a panel page is given to report its first load before the open
+ * request fails visibly. The window is created hidden and shown only after the
+ * page loads, so a load that never settles must not leave the user with a click
+ * that does nothing to show for it (#998): it becomes an error the page that
+ * asked for the panel can display.
+ */
+export const PLUGIN_PANEL_LOAD_SETTLE_MS = 15_000;
+
+/**
+ * A panel's page load, raced against that budget. A load that fails on its own
+ * keeps the original error; a load that hangs becomes the timeout error instead
+ * of an invisible, forever-hidden window. The window that lost the race is
+ * destroyed by the open path's own `catch`, so nothing here reaches into
+ * Electron — this stays a plain promise race a test can drive.
+ */
+export function panelReadyWithin(
+  load: Promise<unknown>,
+  pluginId: string,
+  budgetMs: number = PLUGIN_PANEL_LOAD_SETTLE_MS,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(
+        new Error(
+          `PANEL_LOAD_TIMEOUT: the panel page of ${pluginId} did not report ready within ${Math.round(budgetMs / 1000)}s`,
+        ),
+      );
+    }, budgetMs);
+    Promise.resolve(load).then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
 type ClosablePage = {
   isDestroyed(): boolean;
   once(event: "destroyed", listener: () => void): unknown;
@@ -86,4 +128,52 @@ export function pageGoneWithin(
     }
     page.once("destroyed", finish);
   });
+}
+
+export type TeardownableWindow = {
+  close(): void;
+  destroy(): void;
+  isDestroyed(): boolean;
+  webContents: ClosablePage;
+};
+
+/**
+ * Close a panel window and wait for its webContents to be destroyed.
+ * When `force` is true (such as during plugin reload or host shutdown),
+ * if the page refuses the close (e.g. `beforeunload`) or fails to exit
+ * within `budgetMs`, the window is forcibly destroyed to prevent stale
+ * surfaces from surviving across reloads.
+ */
+export async function teardownPanelWindow(
+  window: TeardownableWindow,
+  options: { force?: boolean; budgetMs?: number } = {},
+): Promise<void> {
+  if (window.isDestroyed()) return;
+  const page = window.webContents;
+  window.close();
+  await pageGoneWithin(page, options.budgetMs);
+  if (options.force && !window.isDestroyed()) {
+    window.destroy();
+  }
+}
+
+/**
+ * Serializes async operations per plugin ID to prevent lifecycle races
+ * between teardown/close and subsequent openPanel requests.
+ */
+export class PanelOperationSerializer {
+  private inFlight = new Map<string, Promise<unknown>>();
+
+  run<T>(pluginId: string, operation: () => Promise<T>): Promise<T> {
+    const prior = this.inFlight.get(pluginId) ?? Promise.resolve();
+    const current = prior.catch(() => undefined).then(operation);
+    this.inFlight.set(pluginId, current);
+    const cleanup = () => {
+      if (this.inFlight.get(pluginId) === current) {
+        this.inFlight.delete(pluginId);
+      }
+    };
+    current.then(cleanup, cleanup);
+    return current;
+  }
 }

@@ -80,6 +80,28 @@ fn state_defaults_on_and_is_project_specific() {
 }
 
 #[test]
+fn project_capability_state_matches_extended_length_drive_paths() {
+    let dir = tempdir().unwrap();
+    let mut state = CapabilityState::new(dir.path(), "skills");
+    state
+        .set_enabled(
+            "skills",
+            CapabilityLevel::Global,
+            "review",
+            Some("E:/work/app"),
+            false,
+        )
+        .unwrap();
+
+    assert!(!state.enabled(
+        "skills",
+        CapabilityLevel::Global,
+        "review",
+        Some(r"\\?\E:\work\app"),
+    ));
+}
+
+#[test]
 fn suffix_keeps_the_preferred_id_when_it_is_free() {
     let taken = HashSet::new();
     assert_eq!(
@@ -319,6 +341,26 @@ fn copy_directory_tree_overwrites_stale_files_and_can_skip_the_document() {
     let whole = dir.path().join("whole");
     copy_directory_tree(&from, &whole, false).unwrap();
     assert_eq!(fs::read_to_string(whole.join("SKILL.md")).unwrap(), "doc");
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_directory_tree_ignores_symlinks() {
+    let dir = tempdir().unwrap();
+    let from = dir.path().join("from");
+    let to = dir.path().join("to");
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&from).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret.txt"), "secret").unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.txt"), from.join("linked.txt")).unwrap();
+    std::os::unix::fs::symlink(&outside, from.join("linked_dir")).unwrap();
+    fs::write(from.join("normal.txt"), "normal").unwrap();
+
+    copy_directory_tree(&from, &to, false).unwrap();
+    assert_eq!(fs::read_to_string(to.join("normal.txt")).unwrap(), "normal");
+    assert!(!to.join("linked.txt").exists());
+    assert!(!to.join("linked_dir").exists());
 }
 
 #[test]

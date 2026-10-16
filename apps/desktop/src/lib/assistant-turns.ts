@@ -4,8 +4,9 @@ import type {
   MessageUsage,
   UiMessage,
 } from "@pi-desktop/shared";
-import { hostedSearchRounds } from "@pi-desktop/shared";
-import { isDelegationStartTool } from "./tool-display";
+import { addUsage, hostedSearchRounds } from "@pi-desktop/shared";
+import { getToolAction, isDelegationStartTool } from "./tool-display";
+import { messageContentFacts } from "./transcript-summary";
 
 export type AssistantActivityItem =
   | { kind: "thinking"; message: UiMessage }
@@ -68,9 +69,10 @@ export function messageThinking(message: UiMessage): string {
 }
 
 function isVisibleMessage(message: UiMessage): boolean {
+  if (message.role === "system" && message.modelSystem) return false;
   return !(
     message.role === "assistant" &&
-    !(message.content || "").trim() &&
+    !messageContentFacts(message).hasContent &&
     !messageThinking(message) &&
     !message.hostedSearch &&
     !message.error
@@ -81,6 +83,18 @@ function isVisibleMessage(message: UiMessage): boolean {
  * tools, and lifecycle rows (TaskWait/TaskList/TaskStop) do not (D319). */
 function isDelegationStartActivity(item: AssistantActivityItem): boolean {
   return item.kind === "tool" && isDelegationStartTool(item.message.toolName);
+}
+
+/**
+ * A `Bash` call or a run alias renders as a standalone row outside any process
+ * or activity-group disclosure (ADR turn-process-and-thinking-display).
+ * Adjacent Bash rows each stay standalone, so a run item neither joins the
+ * preceding segment nor absorbs the next one.
+ */
+export function isStandaloneRunActivity(
+  item: AssistantActivityItem,
+): item is Extract<AssistantActivityItem, { kind: "tool" }> {
+  return item.kind === "tool" && getToolAction(item.message.toolName) === "run";
 }
 
 /** Delegate rows grouped by the `Task` call that produced them, chains merged. */
@@ -107,7 +121,7 @@ function collectSubagentRuns(
     // showing: the text is the only place its narration and report exist.
     const thinking = messageThinking(message);
     if (thinking) run.items.push({ kind: "thinking", message });
-    if ((message.content || "").trim() || message.error) {
+    if (messageContentFacts(message).hasContent || message.error) {
       run.items.push({ kind: "answer", message });
     }
   }
@@ -231,11 +245,20 @@ export function buildTranscriptEntries(
   const pushActivity = (item: AssistantActivityItem) => {
     const current = ensureTurn(item.message);
     const last = current.parts[current.parts.length - 1];
+    const standalone = isStandaloneRunActivity(item);
+    const lastStandalone =
+      last?.kind === "activity" &&
+      last.items.length === 1 &&
+      isStandaloneRunActivity(last.items[0]);
     // A delegation card is only the Task fan-out. Mixing the parent's later
     // Read/Grep/thinking into that group painted them as subagent work (D319).
+    // A standalone run row never merges with a neighbour, so adjacent Bash
+    // calls each keep their own row.
     if (
       last?.kind === "activity" &&
       last.items.length > 0 &&
+      !standalone &&
+      !lastStandalone &&
       isDelegationStartActivity(last.items[0]) === isDelegationStartActivity(item)
     ) {
       last.items.push(item);
@@ -269,9 +292,10 @@ export function buildTranscriptEntries(
     for (const round of hostedSearchRounds(message.hostedSearch)) {
       pushActivity({ kind: "hostedSearch", message, round });
     }
-    if ((message.content || "").trim() || !thinking || message.error) {
+    const hasContent = messageContentFacts(message).hasContent;
+    if (hasContent || !thinking || message.error) {
       current.parts.push({ kind: "message", message });
-      if (!current.anchorId && (message.content || "").trim()) {
+      if (!current.anchorId && hasContent) {
         current.anchorId = message.id;
       }
     }
@@ -548,22 +572,5 @@ export function assistantTurnUsage(
   );
   if (usages.length === 0) return undefined;
 
-  const sum = (field: keyof MessageUsage) =>
-    usages.reduce((total, usage) => total + (usage[field] ?? 0), 0);
-  const optionalSum = (
-    field: "cacheReadTokens" | "cacheWriteTokens" | "reasoningTokens",
-  ) =>
-    usages.some((usage) => usage[field] !== undefined) ? sum(field) : undefined;
-  const cacheReadTokens = optionalSum("cacheReadTokens");
-  const cacheWriteTokens = optionalSum("cacheWriteTokens");
-  const reasoningTokens = optionalSum("reasoningTokens");
-
-  return {
-    inputTokens: sum("inputTokens"),
-    outputTokens: sum("outputTokens"),
-    totalTokens: sum("totalTokens"),
-    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
-    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
-    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
-  };
+  return usages.reduce<MessageUsage | undefined>((total, usage) => addUsage(total, usage), undefined);
 }

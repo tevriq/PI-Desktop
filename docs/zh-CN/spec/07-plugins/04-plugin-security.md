@@ -72,7 +72,10 @@
   永不下发颜色
 - CSS 在加载时从磁盘读取并通过 IPC 整体交付；的
   渲染器将其注入到附加在后面的单个专用 `<style>` 元素中
-  应用程序自己的样式表，因此它可以覆盖令牌但从不注入标记
+  应用程序自己的样式表，因此它可以覆盖令牌但从不注入标记。
+  后写的声明只有在选择器特异度相同时才胜出；应使用
+  `:root[data-theme="light"]` 或 `:root[data-theme="dark"]` 匹配基础调色板的
+  选择器，单独的 `:root` 特异度更低
 - 选择主题是一个设置值（`plugin:<pluginId>:<themeId>`）；如果
   如果插件被禁用或卸载，设置将回退到 `system`
 
@@ -290,7 +293,7 @@ MCP 服务器是 `net.fetch` 旁边的第二个出口路径，因此它是声明
   拒绝，而不是贡献其目录的一个前缀，因为 MCP 工具是以延迟加载的按需条目
   （`ToolSearch` 之后）而非常驻列表的形式到达模型的。服务器按需连接，
   并在插件卸载或禁用时关闭。
-  停止调用方会话会取消该会话正在执行的 MCP 请求，并向服务器发送 `notifications/cancelled`；共享连接及其他会话的调用保持有效。
+  停止调用方会话会取消该会话正在执行的 MCP 请求，并向服务器发送 `notifications/cancelled`；共享连接及其他会话的调用保持有效。请求超时后同样会发送取消通知；`initialize` 请求从不取消。
 
 ## 8.2 桌面控制与设备访问
 
@@ -418,3 +421,11 @@ PI-Desktop 自己当前占用（默认是 `Alt+Space` 与 `Alt+Shift+W`；用户
 - 签名验证（仅对包进行 sha256 检查）
 - 声明的清单权限在加载时自动授予
 - `userSelected` root 不跨重启保留，插件每个会话都得重新问一次
+
+### Fetch redirect policy (unreleased)
+
+The host owns the same redirect loop for default and injected single-hop
+transports. `error` refuses every 3xx with REDIRECT_DISALLOWED; `manual` returns
+it without contacting its target. Default follow retains per-hop egress checks.
+See [the source API contract](/spec/07-plugins/03-plugin-api#net) for capability
+detection, deadline semantics and compatibility. No mode expands network grants.

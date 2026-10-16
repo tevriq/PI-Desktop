@@ -1,3 +1,7 @@
+import { useChatSessionCapability } from "../../../hooks/use-chat-session-capability";
+import { SubagentStopButton } from "./SubagentStopButton";
+import { PlanHistoryCard } from "./PlanHistoryCard";
+import { planSubmission } from "../../../lib/plan-history";
 import { GeneratedImages } from "./GeneratedImages";
 import "../../../styles/generated-images.css";
 import {
@@ -80,6 +84,8 @@ import {
   delegateModelId,
   delegateThinkingLevel,
 } from "./model";
+import { PluginToolCard } from "./PluginToolCard";
+import { useSlotEntryForKey } from "../../../plugins/renderer-slots/use-slots";
 
 type ToolRowProps = {
   message: UiMessage;
@@ -87,8 +93,6 @@ type ToolRowProps = {
   delegate?: SubagentRun;
   /** Card treatment used when several Task calls form a delegation topology. */
   variant?: "default" | "topology";
-  /** Open the latest detailed-mode tool unless the user took over. */
-  autoOpen?: boolean;
   /** The containing turn renders image results outside its process disclosure. */
   imagesInTurn?: boolean;
   /** Claims the containing activity group when this row is manually used. */
@@ -120,7 +124,6 @@ function toolRowPropsEqual(
   if (
     previous.message !== next.message ||
     previous.variant !== next.variant ||
-    previous.autoOpen !== next.autoOpen ||
     previous.imagesInTurn !== next.imagesInTurn ||
     previous.onUserInteraction !== next.onUserInteraction ||
     !subagentRunsEqual(previous.delegate, next.delegate)
@@ -142,11 +145,34 @@ function toolRowPropsEqual(
   );
 }
 
-export const ToolRow = memo(function ToolRow({
+/**
+ * One tool call. A call of a plugin's own tool renders the card that plugin
+ * registered for it (the `toolCard` slot); the host card below is its
+ * fallback, and the only card for every other call. Topology nodes and
+ * denied rows always keep the host card.
+ */
+export const ToolRow = memo(function ToolRow(props: ToolRowProps) {
+  const { message, variant = "default" } = props;
+  const cardEntry = useSlotEntryForKey(
+    "toolCard",
+    variant === "default" && message.toolStatus !== "denied" ? message.toolName : undefined,
+  );
+  const proposal = planSubmission(message);
+  if (proposal && variant === "default" && message.toolStatus !== "denied") {
+    return <PlanHistoryCard message={message} proposal={proposal} onUserInteraction={props.onUserInteraction} />;
+  }
+  const hostRow = <HostToolRow {...props} />;
+  return cardEntry ? (
+    <PluginToolCard key={cardEntry.id} entry={cardEntry} message={message} fallback={hostRow} />
+  ) : (
+    hostRow
+  );
+}, toolRowPropsEqual);
+
+function HostToolRow({
   message,
   delegate,
   variant = "default",
-  autoOpen = false,
   imagesInTurn = false,
   onUserInteraction,
   delegationStatuses,
@@ -154,7 +180,8 @@ export const ToolRow = memo(function ToolRow({
 }: ToolRowProps) {
   const { t } = useTranslation();
   const detailsId = useId();
-  const root = useAppStore((s) => s.workspace?.path);
+  const localToolsAllowed = useChatSessionCapability("canUseLocalTools");
+  const root = useAppStore((s) => localToolsAllowed ? s.workspace?.path : undefined);
   const openTarget = useOpenPreviewTarget();
   const { fileMenu, openFileMenu, closeFileMenu } = useChatFileMenu();
   const openSubagentTab = useAppStore((s) => s.openSubagentTab);
@@ -166,12 +193,11 @@ export const ToolRow = memo(function ToolRow({
   // (D227). Property reads only, so a streaming row can afford it every tick.
   const run = action === "run" ? runOutcome(message) : null;
   const failed = status === "error" || run === "failed";
-  // Detailed mode opens the last tool of the last activity group. Compact keeps
-  // payloads collapsed so a live burst only updates the header. Failure and
-  // denial stay in the row head without expanding the payload automatically.
+  // A tool call never opens itself: the payload waits for the user, and a
+  // failure or denial stays in the row head either way.
   const revealRequest = useMessageRevealRequest(message.id);
   const disclosure = useAutomaticDisclosure(
-    autoOpen && !failed && status !== "denied",
+    false,
     revealRequest,
     disclosureKey("tool", message.id),
   );
@@ -371,6 +397,7 @@ export const ToolRow = memo(function ToolRow({
       aria-label={`${t("chat.toolCall")}: ${rawName}${agentName ? `, ${agentName}` : ""}${modelLabel ? `, ${modelLabel}` : ""}${statusLabel ? `, ${statusLabel}` : ""}`}
     >
       {variant === "topology" ? (
+        <div className="subagent-topology-node-actions">
         <button
           className="subagent-topology-node-header"
           aria-expanded={panelOpen}
@@ -380,7 +407,7 @@ export const ToolRow = memo(function ToolRow({
           onClick={() => {
             if (!hasDetails) return;
             onUserInteraction?.();
-            openSubagentTab(panelSelectionId, agentName || undefined);
+            localToolsAllowed && openSubagentTab(panelSelectionId, agentName || undefined);
           }}
         >
           <span className="subagent-topology-avatar" aria-hidden>
@@ -408,7 +435,8 @@ export const ToolRow = memo(function ToolRow({
                   title={modelLabel}
                   aria-label={modelLabel}
                 >
-                  {modelLabel}
+                  <span className="subagent-topology-node-model-name">{modelId}</span>
+                  {thinkingLabel ? <span className="subagent-topology-node-thinking"> {thinkingLabel}</span> : null}
                 </span>
               ) : null}
               <span className="subagent-topology-node-status">
@@ -431,6 +459,8 @@ export const ToolRow = memo(function ToolRow({
             <span className="tool-spinner" aria-label={t("chat.running")} />
           ) : null}
         </button>
+        {typeof delegationId === "string" && <SubagentStopButton delegationId={delegationId} running={outcome === "running" && !creating} name={agentName} />}
+        </div>
       ) : (
         <div className={`tool-row-head${runHead ? " is-run" : ""}`}>
           <button
@@ -470,16 +500,16 @@ export const ToolRow = memo(function ToolRow({
             ) : null}
             {summary ? (
               <span
-                className={`tool-row-summary${previewTarget ? " linked" : ""}`}
+                className={`tool-row-summary${previewTarget && localToolsAllowed ? " linked" : ""}`}
                 title={
-                  previewTarget
+                  previewTarget && localToolsAllowed
                     ? previewTarget.kind === "file"
                       ? t("chat.previewFile")
                       : t("chat.previewUrl")
                     : undefined
                 }
                 onClick={
-                  previewTarget
+                  previewTarget && localToolsAllowed
                     ? (e) => {
                         // Open the preview target instead of toggling details.
                         e.stopPropagation();
@@ -488,7 +518,7 @@ export const ToolRow = memo(function ToolRow({
                     : undefined
                 }
                 onContextMenu={
-                  previewTarget?.kind === "file"
+                  localToolsAllowed && previewTarget?.kind === "file"
                     ? (event) =>
                         openFileMenu(event, { path: previewTarget.path })
                     : undefined
@@ -557,7 +587,7 @@ export const ToolRow = memo(function ToolRow({
             label={t("chat.collapseToolOutput")}
             onCollapse={collapseRow}
           />
-          <ToolDetailBlocks blocks={blocks} plain={runHead} />
+          <ToolDetailBlocks blocks={blocks} plain={runHead} streaming={status === "running"} />
         </div>
       ) : null}
       {!imagesInTurn && <GeneratedImages message={message} />}
@@ -571,7 +601,7 @@ export const ToolRow = memo(function ToolRow({
       <ContextMenu state={fileMenu} onClose={closeFileMenu} />
     </div>
   );
-}, toolRowPropsEqual);
+}
 
 /**
  * What a delegate did, nested under the `Task` call that spawned it.

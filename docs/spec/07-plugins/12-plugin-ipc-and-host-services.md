@@ -81,10 +81,11 @@ PluginManager
 
 The shipped `pluginChanged` event carries a `reason` so the renderer can decide
 what to refetch: `install`, `loadDev`, `enable`, `disable`, `uninstall`, `crash`,
-`service`, `market.install`, `market.applyUpdates`, `themes` (runtime
+`service`, `restore`, `market.install`, `market.applyUpdates`, `themes` (runtime
 `themes.upsert` / `themes.remove`). `service` fires on every
 supervision transition and is the cheapest of them — only the service list needs
-a reload.
+a reload. `restore` fires once when startup recovery has loaded the enabled
+plugins, so a surface that listed them earlier still sees them.
 
 `settingsChanged` (`pi-desktop/app/event/settingsChanged`) carries a settings
 patch when the **host** writes app settings outside the renderer path — today
@@ -227,6 +228,19 @@ toast plus `pluginChanged` to the renderer.
 3. Start/stop triggers contribution registration/deregistration
 4. The market IPC runs end-to-end under a mock provider (later milestone)
 
+The title plugin uses two narrow plugin session RPC methods after the Electron
+broker enforces `session.autoTitle`:
+
+- `plugin.session.autoTitleContext` returns only the first user message and
+  first assistant reply, each character-bounded, and only while `title_source`
+  is `default`.
+- `plugin.session.setAutoTitle` validates the title and updates it only when
+  both the expected title and `default` source still match. A successful update
+  triggers the ordinary host-owned `sessionsChanged` event.
+
+These methods are additive to host RPC protocol v11. They do not grant access to
+`plugin.session.listMessages` or the general session transcript.
+
 ## Appendix: agent-tool dispatch protocol (implemented M5)
 
 Plugin agent tools execute in the desktop runner (Electron main), while the
@@ -235,7 +249,7 @@ permission gate and result envelope stay in host-core:
 1. Model calls `plugin_<pluginIdSafe>_<toolName>`; the sidecar forwards it
    to host `tools.execute` like any built-in tool.
 2. host-core resolves the durable operating mode first. In Agent it runs the
-   normal permission flow (risk, session grants, 120s timeout), then emits
+   normal permission flow (risk, session grants, no automatic deadline), then emits
    notification `plugins.execute`
    `{ executionId, sessionId, toolCallId, toolName, args, turnId }`. `turnId` is
    the runtime turn identity, forwarded unchanged so the plugin tool context can
@@ -249,10 +263,9 @@ permission gate and result envelope stay in host-core:
    (`DESKTOP_TOOL_DISPATCH_TIMEOUT_MS`, above both the 110s plugin tool budget
    and the widest MCP leg — a 10s lazy handshake, a 30s `tools/list` traversal,
    then the 100s call) and then maps to `TOOL_TIMEOUT`; an unknown/unloaded tool
-   maps to `TOOL_NOT_FOUND`. The transport deadline for these calls covers the
-   120s permission wait, the 30s admission queue wait, that dispatch, and 10s of
-   slack (`rpcTimeoutMs`), so no outer layer gives up before host-core reports
-   the outcome.
+   maps to `TOOL_NOT_FOUND`. The `tools.execute` transport has no deadline while
+   waiting for the explicit permission decision; after approval, host-core's
+   execution budget remains authoritative.
 
 The model-facing registry gains plugin tools per prompt: main passes registered
 defs (`fullName`, description, JSON-schema parameters) to `agent.prompt`, and

@@ -1,3 +1,4 @@
+import { loadRecentModels } from "../../lib/recent-models";
 import type { AppState, AppStateData } from "../app-state";
 import { projectWorkspaceFromPath } from "../../lib/sidebar-preferences";
 import { loadSidebarPreferences } from "../../lib/sidebar-preferences";
@@ -18,6 +19,7 @@ function withProjectDisplayName(
 export function createInitialState(): AppStateData {
   return {
     ready: false,
+    recentModels: loadRecentModels(),
     healthOk: false,
     sessions: [],
     sessionMeta: initialSidebarPreferences.sessionMeta,
@@ -34,6 +36,7 @@ export function createInitialState(): AppStateData {
     ),
     openProjectPaths: initialSidebarPreferences.openProjectPaths,
     createProjectDialogOpen: false,
+    createProjectDialogRemoteHostKey: undefined,
     activeProjectPath: undefined,
     projectMeta: initialSidebarPreferences.projectMeta,
     projectCollapsed: Object.fromEntries(
@@ -72,6 +75,7 @@ export function createInitialState(): AppStateData {
     planningStates: {},
     pendingPlans: {},
     planCheckpoints: {},
+    sessionTodos: {},
     page: "chat",
     settingsTab: "general",
     settingsAnchor: null,

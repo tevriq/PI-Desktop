@@ -29,6 +29,8 @@ const [
   enSource,
   zhSource,
   changelogSource,
+  changelogLoaderSource,
+  englishChangelogSource,
 ] = await Promise.all([
   read("../../../packages/shared/src/protocol.ts"),
   readSharedTypesSource(),
@@ -47,6 +49,8 @@ const [
   read("../../../packages/i18n/src/locales/en/index.ts"),
   read("../../../packages/i18n/src/locales/zh-CN/index.ts"),
   read("../../../packages/shared/src/changelog.ts"),
+  read("../../../packages/shared/src/changelog-loader.ts"),
+  read("../../../packages/shared/src/changelog-en.ts"),
 ]);
 
 test("update IPC channels are declared and whitelisted for the preload bridge", () => {
@@ -56,6 +60,7 @@ test("update IPC channels are declared and whitelisted for the preload bridge", 
     "updatesDownload",
     "updatesInstall",
     "updatesOpenReleases",
+    "updatesDismiss",
     "updatesState",
   ]) {
     assert.match(protocolSource, new RegExp(`${channel}:`), channel);
@@ -78,6 +83,7 @@ test("main process registers update handlers and the auto-check lifecycle", () =
     "IPC.invoke.updatesDownload",
     "IPC.invoke.updatesInstall",
     "IPC.invoke.updatesOpenReleases",
+    "IPC.invoke.updatesDismiss",
   ]) {
     assert.ok(mainSource.includes(channel), channel);
   }
@@ -186,6 +192,8 @@ test("renderer exposes the updates API, banner and settings row", () => {
   assert.match(apiSource, /updatesGetState:/);
   assert.match(apiSource, /updatesCheck:/);
   assert.match(apiSource, /updatesInstall:/);
+  assert.match(bannerSource, /update\.dismissed === true/);
+  assert.match(bannerSource, /api\.updatesDismiss\(\)/);
   assert.match(apiSource, /onUpdateState:/);
   assert.match(bannerSource, /updates\.restart/);
   assert.match(bannerSource, /updates\.viewRelease/);
@@ -201,8 +209,14 @@ test("renderer exposes the updates API, banner and settings row", () => {
   assert.match(settingsSource, /update-settings-notes/);
   assert.match(settingsSource, /updates\.whatsNew/);
   assert.match(settingsSource, /updates\.releaseNotes/);
+  assert.match(settingsSource, /const ReleaseNotesDialog = lazy\(\(\) =>/);
+  assert.match(settingsSource, /<Suspense[\s\S]*?<ReleaseNotesDialog/);
+  assert.match(settingsSource, /role="status"[\s\S]*?app\.loadingView/);
   assert.match(settingsSource, /<ReleaseNotesDialog/);
-  assert.match(releaseNotesDialogSource, /CHANGELOG\[locale\]/);
+  assert.match(releaseNotesDialogSource, /loadChangelogCatalog\(locale\)/);
+  assert.match(releaseNotesDialogSource, /setLoadedCatalog\(\{ locale, entries: catalog \}\)/);
+  assert.match(changelogLoaderSource, /import\("\.\/changelog-en\.js"\)/);
+  assert.match(changelogLoaderSource, /import\("\.\/changelog-zh-CN\.js"\)/);
   assert.match(releaseNotesDialogSource, /new Intl\.DateTimeFormat\(locale,/);
   assert.match(releaseNotesDialogSource, /role="dialog"/);
   assert.match(releaseNotesDialogSource, /aria-modal="true"/);
@@ -254,7 +268,7 @@ test("check-for-updates is reachable from the application menu", () => {
   }
 });
 
-test("packaging publishes an electron-updater feed for GitHub Releases", () => {
+test("packaging publishes an electron-updater feed for GitHub Releases", async () => {
   const pkg = JSON.parse(pkgSource);
   assert.ok(pkg.dependencies["electron-updater"], "electron-updater dependency");
   assert.equal(pkg.build.publish[0].provider, "github");
@@ -268,6 +282,31 @@ test("packaging publishes an electron-updater feed for GitHub Releases", () => {
     "update feed must not target the upstream repository",
   );
   assert.equal(pkg.build.publish[0].repo, "PI-Desktop");
+  const windowsUpdateConfigResource = pkg.build.win.extraResources.find(
+    ({ from }) => from === "resources/app-update.yml",
+  );
+  assert.deepEqual(windowsUpdateConfigResource, {
+    from: "resources/app-update.yml",
+    to: "app-update.yml",
+  }, "Windows packages carry the updater config needed by manual ZIP checks");
+  const updateConfig = Object.fromEntries(
+    (await read("../resources/app-update.yml"))
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => {
+        const separator = line.indexOf(":");
+        return [
+          line.slice(0, separator),
+          line.slice(separator + 1).trim().replace(/^['"]|['"]$/g, ""),
+        ];
+      }),
+  );
+  assert.deepEqual(updateConfig, {
+    provider: pkg.build.publish[0].provider,
+    owner: pkg.build.publish[0].owner,
+    repo: pkg.build.publish[0].repo,
+    updaterCacheDirName: `${pkg.name.replaceAll("/", "")}-updater`,
+  });
   const macTargets = pkg.build.mac.target.map((entry) => entry.target);
   assert.ok(macTargets.includes("zip"), "mac zip target (Squirrel.Mac feed)");
   // electron-builder must never self-publish (implicit tag publishing would
@@ -337,7 +376,7 @@ test("shared shipped-locale changelog is the in-app notes source of truth", () =
   assert.match(changelogSource, /formatChangelogNotes/);
   assert.match(changelogSource, /"zh-CN"/);
   assert.match(changelogSource, /"zh-TW"/);
-  assert.match(changelogSource, /version: "0\.2\.7"/);
+  assert.match(englishChangelogSource, /version: "0\.2\.7"/);
   assert.match(
     mainSource,
     /getLocale:\s*\(\)\s*=>\s*(?:updaterLocale|mainState\.updaterLocale)/,

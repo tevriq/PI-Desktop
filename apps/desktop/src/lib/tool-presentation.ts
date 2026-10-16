@@ -3,9 +3,11 @@ import {
   delegationLifecycleKind,
   getToolAction,
   getToolSummaryKey,
+  isAskToolName,
   type ToolAction,
 } from "./tool-display";
 import { reviewChangeFromMessage } from "./workspace-review";
+import { isWithinHighlightLimits } from "./render-content-limits";
 
 /*
  * Structured presentation of one tool call (D192).
@@ -22,8 +24,6 @@ import { reviewChangeFromMessage } from "./workspace-review";
  */
 
 /** Beyond this, syntax highlighting costs more than it is worth on expand. */
-const MAX_HIGHLIGHT_BYTES = 100_000;
-const MAX_HIGHLIGHT_LINES = 800;
 /** Rendered list caps; the remainder is reported, never silently dropped. */
 const MAX_LIST_ITEMS = 200;
 const DIFF_CONTEXT_LINES = 2;
@@ -76,6 +76,10 @@ type BlockBase = {
 };
 
 export type ToolBlock =
+  | (BlockBase & {
+      kind: "asktool";
+      questions: { question: string; answers: string[] | null }[];
+    })
   | (BlockBase & {
       kind: "code";
       text: string;
@@ -224,14 +228,6 @@ function rosterRows(
   return rows.length > 0 ? { kind: "fields", role: "details", rows } : null;
 }
 
-function countLines(text: string): number {
-  let lines = 1;
-  for (let i = 0; i < text.length; i += 1) {
-    if (text.charCodeAt(i) === 10) lines += 1;
-  }
-  return lines;
-}
-
 /** Extension-derived Shiki tag; `resolveLang` normalizes it at render time. */
 export function langForPath(path: string | null): string {
   if (!path) return "";
@@ -257,8 +253,7 @@ function codeBlock(
     lang,
     highlight:
       lang !== "" &&
-      text.length <= MAX_HIGHLIGHT_BYTES &&
-      countLines(text) <= MAX_HIGHLIGHT_LINES,
+      isWithinHighlightLimits(text),
     ...(extra?.tone ? { tone: extra.tone } : {}),
     ...(extra?.label ? { label: extra.label } : {}),
   };
@@ -443,6 +438,41 @@ function safeJson(value: unknown): string {
   }
 }
 
+function askToolResultBlock(
+  message: ToolPresentationMessage,
+): ToolBlock | null {
+  const details = asRecord(toolResultPayload(message));
+  const rawQuestions = details?.questions;
+  const rawAnswers = details?.answers;
+  if (
+    !Array.isArray(rawQuestions) ||
+    rawQuestions.length === 0 ||
+    !Array.isArray(rawAnswers) ||
+    rawQuestions.length !== rawAnswers.length
+  ) {
+    return null;
+  }
+
+  const questions: Array<{ question: string; answers: string[] | null }> = [];
+  for (let index = 0; index < rawQuestions.length; index += 1) {
+    const question = stringAt(asRecord(rawQuestions[index]), "question");
+    const answer = rawAnswers[index];
+    if (
+      question === null ||
+      !(answer === null ||
+        (Array.isArray(answer) && answer.every((value) => typeof value === "string")))
+    ) {
+      return null;
+    }
+    questions.push({
+      question,
+      answers: answer === null || answer.length === 0 ? null : [...answer],
+    });
+  }
+
+  return { kind: "asktool", role: "details", questions };
+}
+
 /**
  * What actually happened to a command, read from what the shell returned rather
  * than from the status of the call that carried it: a command that exits
@@ -619,6 +649,20 @@ function resultBlocks(
       if (resolved) blocks.push(resolved);
       break;
     }
+    case "todo": {
+      const todoArgs = args ? safeJson(args) : "";
+      if (todoArgs) blocks.push(codeBlock("input", todoArgs, "json"));
+      const warnings = stringArray(details?.warnings);
+      if (warnings) {
+        for (const warning of warnings) {
+          blocks.push({ kind: "note", role: "notice", text: warning });
+        }
+      }
+      const text = stringAt(details, "text");
+      if (text) blocks.push({ kind: "note", role: "notice", text });
+      mapped = true;
+      break;
+    }
     case "delegate": {
       // A lifecycle row (ADR 0089) has no brief and no report of its own: it
       // reports on subagents. Its body is the roster the runtime returned, as
@@ -691,6 +735,11 @@ export function buildToolPresentation(
   message: ToolPresentationMessage,
   options: ToolPresentationOptions = {},
 ): ToolBlock[] {
+  if (isAskToolName(message.toolName)) {
+    const askToolBlock = askToolResultBlock(message);
+    if (askToolBlock) return [askToolBlock];
+  }
+
   const action = getToolAction(message.toolName);
   const args = asRecord(message.toolArgs);
   const payload = toolResultPayload(message);

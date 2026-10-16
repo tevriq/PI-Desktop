@@ -68,12 +68,15 @@ test("a delegation card reads its outcome from the lifecycle rows", () => {
   assert.match(topologySource, /if \(isDelegationActivityItem\(item\)\) continue;/);
   assert.match(
     transcriptSource,
-    /const delegationStatuses = turnDelegationStatuses \?\? collectDelegationStatuses\(items\)/,
+    /const delegationStatuses = useMemo\(\(\) => turnDelegationStatuses \?\? collectDelegationStatuses\(delegationItems\)/,
   );
+  // Delegates remain live across replies split by steering in the same runtime turn.
   assert.match(
     transcriptSource,
-    /collectDelegationStatuses\(turnAllActivityItems, \{ turnLive: isActive \}\)/,
+    /collectDelegationStatuses\(delegationItems, \{ turnLive: isActive \|\| delegationsLive === true \}\)/,
   );
+  assert.match(transcriptSource, /const tools = reuseReferences\(toolsRef\.current, summary\.tools\)/);
+  assert.match(transcriptSource, /delegationItems = useMemo\(\(\) => tools\.map/);
 });
 
 test("a lifecycle row summarizes by agent name, never by delegation id", () => {
@@ -235,7 +238,7 @@ test("every Task row renders as one accessible delegation topology", () => {
   );
   assert.match(
     transcriptSource,
-    /<SubagentTopology\s+key="subagent-topology"\s+items=\{delegateItems\}\s+delegationStatuses=\{delegationStatuses\}\s+delegationTimings=\{delegationTimings\}\s+onUserInteraction=\{claimDisclosure\}\s*\/>/,
+    /<SubagentTopology\s+key="subagent-topology"\s+items=\{delegateItems\}\s+delegationStatuses=\{delegationStatuses\}\s+delegationTimings=\{delegationTimings\}\s+onUserInteraction=\{onUserInteraction\}\s*\/>/,
   );
   assert.match(transcriptSource, /className="subagent-topology" aria-labelledby=/);
   assert.match(transcriptSource, /className="subagent-topology-agents"/);
@@ -257,7 +260,7 @@ test("every Task row renders as one accessible delegation topology", () => {
   assert.doesNotMatch(topologyNode, /tool-row-caret/);
   assert.match(
     topologyNode,
-    /onClick=\{\(\) => \{\s*if \(!hasDetails\) return;\s*onUserInteraction\?\.\(\);\s*openSubagentTab\(panelSelectionId, agentName \|\| undefined\);\s*\}\}/,
+    /onClick=\{\s*\(\) => \{\s*if \(!hasDetails\) return;\s*onUserInteraction\?\.\(\);\s*localToolsAllowed && openSubagentTab\(panelSelectionId, agentName \|\| undefined\);\s*\}\}/,
   );
   assert.match(
     transcriptSource,

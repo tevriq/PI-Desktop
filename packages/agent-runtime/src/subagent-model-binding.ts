@@ -1,3 +1,4 @@
+import { accountModelStream, type UsageObserver } from "./request-usage.js";
 import {
   buildProviderModel,
   copilotRequestHeaders,
@@ -10,6 +11,7 @@ import {
   openCodeEndpointFromProvider,
   withOpenCodeSessionHeaders,
 } from "./opencode-session-headers.js";
+import { withSessionAffinityOptions } from "./session-affinity.js";
 import { mergeProviderHeaders, withProviderHeaders } from "./provider-headers.js";
 import { clampOutputToContext } from "./output-cap.js";
 import {
@@ -35,6 +37,7 @@ export function subagentModelBinding(opts: {
   thinkingLevel: SubagentThinkingLevel;
   sessionId: string;
   maxTokens?: number;
+  onUsage?: UsageObserver;
 }, retry: SubagentProviderRetryState) {
   // A definition may cap the delegate's own output (issue #171). The
   // catalog's published limit keeps applying otherwise, so this is an
@@ -83,6 +86,7 @@ export function subagentModelBinding(opts: {
                   ? response?.headers
                   : undefined;
               }),
+              opts.provider.authKind,
             ),
           },
           {
@@ -96,14 +100,27 @@ export function subagentModelBinding(opts: {
         ),
         m.api,
       );
+      // The conversation key rides the same options object the retry stream
+      // reuses, so every attempt of this delegate carries the parent session's
+      // id rather than only the first.
+      const sessionOptions = withSessionAffinityOptions(requestOptions, {
+        provider: opts.provider,
+        api: m.api,
+        baseUrl: m.baseUrl,
+        sessionId: opts.sessionId,
+      });
       return createProviderRetryStream(
         m,
         context,
-        requestOptions,
-        (retryOptions) =>
+        sessionOptions,
+        (retryOptions) => accountModelStream(m, () =>
           omitThinking
             ? models.stream(omitThinkingModel, context, retryOptions)
-            : models.streamSimple(m, context, retryOptions),
+            : models.streamSimple(m, context, retryOptions), {
+              providerId: opts.provider.id,
+              nativeCost: opts.provider.modelConfig?.nativeCost,
+              onUsage: opts.onUsage,
+            }),
         {
           claim: (error, phase) => retry.claim(error, phase),
           headers: () => retry.headers,

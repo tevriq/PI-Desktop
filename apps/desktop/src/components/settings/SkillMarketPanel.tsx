@@ -177,6 +177,7 @@ export function SkillMarketPanel({
     url: "",
   });
   const [remote, setRemote] = useState<RemoteState>(REMOTE_IDLE);
+  const [catalogRetry, setCatalogRetry] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -209,18 +210,7 @@ export function SkillMarketPanel({
   useEffect(() => {
     let cancelled = false;
     const timer = setTimeout(() => {
-      setRemote((current) =>
-        current.status === "idle" || current.status === "ready"
-          ? {
-              status: "loading",
-              entries: current.entries,
-              failed: current.failed,
-              failureKinds: current.failureKinds,
-              failureDetails: current.failureDetails,
-              queryError: current.queryError,
-            }
-          : current,
-      );
+      setRemote((current) => ({ ...current, status: "loading" }));
       api
         .searchSkillMarket(search, [...DEFAULT_SKILL_SOURCES, ...sources])
         .then((result) => {
@@ -254,7 +244,7 @@ export function SkillMarketPanel({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [search, sources]);
+  }, [search, sources, catalogRetry]);
 
   const sourceName = (id?: string) =>
     id
@@ -301,10 +291,27 @@ export function SkillMarketPanel({
         // Swallowing this left the sheet on a null body, so the install button
         // sat disabled behind the word "Loading…" with no reason and no way to
         // try again — the dead end issue #419 reports.
+        const kind = classifySkillMarketFailure(error);
         setPreviewFailure({
-          kind: classifySkillMarketFailure(error),
+          kind,
           detail: skillMarketFailureDetail(error),
         });
+        // The reason belongs to one attempt of opening the sheet, or of asking
+        // it to try again, so it is announced once as a toast. What the sheet
+        // keeps is what stays useful: the recovery hint, the host's own detail,
+        // and the retry control that clear the dead end issue #419 reports.
+        showToast(
+          t(
+            kind === "policy"
+              ? "settings.sklm.previewPolicyError"
+              : kind === "fake-ip"
+                ? "settings.sklm.previewFakeIpError"
+                : kind === "unresolved"
+                  ? "settings.sklm.previewResolveError"
+                  : "settings.sklm.previewError",
+          ),
+          { variant: "error" },
+        );
       });
   };
 
@@ -317,6 +324,11 @@ export function SkillMarketPanel({
     if (installFor) loadDocument(installFor);
   };
 
+  const retryCatalog = () => {
+    setRemote((current) => ({ ...current, status: "loading" }));
+    setCatalogRetry((current) => current + 1);
+  };
+
   const install = async () => {
     if (!installFor || installing) return;
     setInstalling(true);
@@ -326,7 +338,6 @@ export function SkillMarketPanel({
       if (assembled.tooLarge) {
         setDocumentBody(assembled.body);
         setDocumentTooLarge(true);
-        showToast(t("settings.sklm.documentTooLarge"), { variant: "error" });
         return;
       }
       const created = await api.createUserSkill({
@@ -551,19 +562,7 @@ export function SkillMarketPanel({
 
           <div className="ext-field-group">
             <div className="ext-field-label">{t("settings.sklm.preview")}</div>
-            {previewFailure ? (
-              <p className="sklm-note is-error" role="alert">
-                {t(
-                  previewFailure.kind === "policy"
-                    ? "settings.sklm.previewPolicyError"
-                    : previewFailure.kind === "fake-ip"
-                      ? "settings.sklm.previewFakeIpError"
-                      : previewFailure.kind === "unresolved"
-                        ? "settings.sklm.previewResolveError"
-                        : "settings.sklm.previewError",
-                )}
-              </p>
-            ) : (
+            {previewFailure ? null : (
               <pre className="sklm-preview">{documentBody ?? t("common.loading")}</pre>
             )}
             {previewFailure?.kind === "policy" ? (
@@ -686,6 +685,9 @@ export function SkillMarketPanel({
           {hasUnresolvedFailure(remote.failureKinds) ? (
             <p className="sklm-status">{t("settings.sklm.dnsHint")}</p>
           ) : null}
+          <button type="button" className="sklm-install is-ghost" onClick={retryCatalog}>
+            {t("settings.sklm.retryCatalog")}
+          </button>
         </>
       ) : null}
       {remote.status === "ready" && remote.failed.length ? (
@@ -702,6 +704,9 @@ export function SkillMarketPanel({
           {hasUnresolvedFailure(remote.failureKinds) ? (
             <p className="sklm-status">{t("settings.sklm.dnsHint")}</p>
           ) : null}
+          <button type="button" className="sklm-install is-ghost" onClick={retryCatalog}>
+            {t("settings.sklm.retryCatalog")}
+          </button>
         </>
       ) : null}
 

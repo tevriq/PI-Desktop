@@ -3,68 +3,18 @@
  * a custom endpoint the name, URL and API format (D310, D625).
  *
  * The chosen service reads as a settled fact with a Change action rather than
- * an open menu, and a status line under the key says whether the service
- * answered, so pasting a key is visibly the whole job on a named service.
+ * an open menu. Whether the service answered is announced by the probe itself
+ * (`useProbeFeedback`), so pasting a key is visibly the whole job on a named
+ * service without a status row holding the dialog open for it.
  */
-import type { ReactNode, RefObject } from "react";
+import type { RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import type { CatalogApiStyle } from "@pi-desktop/shared";
-import { Field, Input } from "../ui";
-import { IconCheck } from "../icons";
+import { Field, Input, SettingsToggle } from "../ui";
 import { SettingsMenuSelect } from "./SettingsMenuSelect";
 import { ServiceMonogram } from "./ServiceMonogram";
-import { ModelsFetchErrorMessage } from "./ModelsFetchErrorMessage";
-import { canRecommendFrom } from "./recommended-models";
-import { hostOf } from "./service-catalog";
-import type { ProviderModelsState } from "./useProviderModels";
+import { endpointLabel } from "./service-catalog";
 import { API_STYLE_LABEL_KEYS, CUSTOM_PROVIDER_API_STYLES } from "./provider-api-style";
-
-/**
- * One line that answers "did it work?" for the credentials above it. Silent
- * while nothing can be asked yet, then connecting, connected with a count, or
- * the classified failure the model picker would show.
- */
-export function ConnectionStatus({
-  active,
-  discovery,
-  named,
-}: {
-  /** Whether the form holds enough to contact the service. */
-  active: boolean;
-  discovery: ProviderModelsState;
-  named: boolean;
-}) {
-  const { t } = useTranslation();
-  let content: ReactNode;
-  let tone: "hint" | "ok" | "error" = "hint";
-  if (!active) {
-    content = t(named ? "settings.connectionKeyHint" : "settings.connectionUrlHint");
-  } else if (
-    discovery.status === "idle" ||
-    discovery.status === "loading" ||
-    discovery.source === "cache"
-  ) {
-    content = t("settings.connectionChecking");
-  } else if (discovery.status === "ready" && !discovery.error) {
-    tone = "ok";
-    content = t(
-      discovery.source === "remote" ? "settings.connectionReady" : "settings.connectionCatalog",
-      { count: discovery.models.length },
-    );
-  } else if (canRecommendFrom(discovery, named)) {
-    // A named vendor without a model-list route: the key was not refused.
-    tone = "ok";
-    content = t("settings.connectionNoModelList", { count: discovery.models.length });
-  } else {
-    return <ModelsFetchErrorMessage error={discovery.error} variant="status" />;
-  }
-  return (
-    <div className={`provider-connection-status is-${tone}`} aria-live="polite">
-      {tone === "ok" ? <IconCheck size={12} aria-hidden /> : null}
-      <span>{content}</span>
-    </div>
-  );
-}
 
 export type ProviderConnectionFieldsProps = {
   named: boolean;
@@ -72,13 +22,19 @@ export type ProviderConnectionFieldsProps = {
   editing: boolean;
   saving: boolean;
   serviceLabel: string;
+  /** Optional hint for a key that belongs to a Host-owned plugin row. */
+  apiKeyHint?: string;
   /** Endpoint the named preset talks to; empty on a custom endpoint. */
   serviceBaseUrl: string;
+  /** Hides service switching when the manifest owns this provider row. */
+  lockedService?: boolean;
   onChangeService: () => void;
   apiKeyRef: RefObject<HTMLInputElement | null>;
   nameRef: RefObject<HTMLInputElement | null>;
   apiKey: string;
   onApiKeyChange: (value: string) => void;
+  noApiKeyRequired: boolean;
+  onNoApiKeyRequiredChange: (required: boolean) => void;
   name: string;
   onNameChange: (value: string) => void;
   baseUrl: string;
@@ -91,7 +47,6 @@ export type ProviderConnectionFieldsProps = {
   apiStyleNote?: string;
   accountOnlyApiStyle: boolean;
   requiresApiStyleChoice: boolean;
-  status: ReactNode;
 };
 
 export function ProviderConnectionFields({
@@ -100,12 +55,16 @@ export function ProviderConnectionFields({
   editing,
   saving,
   serviceLabel,
+  apiKeyHint,
   serviceBaseUrl,
+  lockedService = false,
   onChangeService,
   apiKeyRef,
   nameRef,
   apiKey,
   onApiKeyChange,
+  noApiKeyRequired,
+  onNoApiKeyRequiredChange,
   name,
   onNameChange,
   baseUrl,
@@ -117,7 +76,6 @@ export function ProviderConnectionFields({
   apiStyleNote,
   accountOnlyApiStyle,
   requiresApiStyleChoice,
-  status,
 }: ProviderConnectionFieldsProps) {
   const { t } = useTranslation();
   const keyHint = editing ? t("settings.apiKeyKeepHint") : undefined;
@@ -138,24 +96,26 @@ export function ProviderConnectionFields({
               <span className="provider-service-chip-name">{serviceLabel}</span>
               {serviceBaseUrl ? (
                 <span className="provider-service-chip-host" title={serviceBaseUrl}>
-                  {hostOf(serviceBaseUrl)}
+                  {endpointLabel(serviceBaseUrl)}
                 </span>
               ) : null}
             </span>
-            <button
-              type="button"
-              className="provider-service-chip-change"
-              disabled={saving}
-              onClick={onChangeService}
-            >
-              {t("settings.changeService")}
-            </button>
+            {!lockedService ? (
+              <button
+                type="button"
+                className="provider-service-chip-change"
+                disabled={saving}
+                onClick={onChangeService}
+              >
+                {t("settings.changeService")}
+              </button>
+            ) : null}
           </div>
         </div>
 
         {named ? (
           <div className="provider-setup-key">
-            <Field label={t("settings.apiKey")} hint={keyHint}>
+            <Field label={t("settings.apiKey")} hint={apiKeyHint ?? keyHint}>
               <Input
                 ref={apiKeyRef}
                 type="password"
@@ -167,7 +127,6 @@ export function ProviderConnectionFields({
                 onChange={(event) => onApiKeyChange(event.target.value)}
               />
             </Field>
-            {status}
           </div>
         ) : null}
       </div>
@@ -210,17 +169,36 @@ export function ProviderConnectionFields({
             </div>
           </div>
           <div className="provider-setup-field-row provider-setup-custom-auth-row">
-            <Field label={t("settings.apiKey")} hint={keyHint}>
-              <Input
-                ref={apiKeyRef}
-                type="password"
-                value={apiKey}
-                placeholder="sk-…"
-                className="font-mono text-sm-plus"
-                autoComplete="off"
-                onChange={(event) => onApiKeyChange(event.target.value)}
-              />
-            </Field>
+            <div className="provider-setup-key">
+              <Field label={t("settings.apiKey")} hint={keyHint}>
+                <Input
+                  ref={apiKeyRef}
+                  type="password"
+                  value={apiKey}
+                  placeholder="sk-…"
+                  className="font-mono text-sm-plus"
+                  autoComplete="off"
+                  disabled={saving || noApiKeyRequired}
+                  onChange={(event) => onApiKeyChange(event.target.value)}
+                />
+              </Field>
+              <div className="provider-setup-no-api-key-option">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm text-text-secondary">
+                    {t("settings.noApiKeyRequired")}
+                  </span>
+                  <SettingsToggle
+                    checked={noApiKeyRequired}
+                    label={t("settings.noApiKeyRequired")}
+                    disabled={saving}
+                    onChange={() => onNoApiKeyRequiredChange(!noApiKeyRequired)}
+                  />
+                </div>
+                <p className="text-xs text-text-muted">
+                  {t("settings.noApiKeyHint")}
+                </p>
+              </div>
+            </div>
             <Field
               label={t("settings.apiStyle")}
               hint={apiStyleNote ?? (accountOnlyApiStyle ? t(requiresApiStyleChoice
@@ -249,7 +227,6 @@ export function ProviderConnectionFields({
               />
             </Field>
           </div>
-          {status}
         </>
       ) : null}
     </div>

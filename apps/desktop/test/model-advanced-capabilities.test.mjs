@@ -97,7 +97,10 @@ test("image generation selection hides the summary when nothing can be chosen", 
   );
   assert.match(pickerSource, /imageModelIds\?\.some\([\s\S]*?modelId\.toLowerCase\(\) === binding\.id\.toLowerCase\(\)/);
   assert.match(pickerSource, /onImageModelChange\(binding\.id, event\.target\.checked\)/);
-  assert.match(imageModelRowSource, /imageGenerationBindings\(settings\.imageGenerationModels, null\)/);
+  // The row's own rule — the stored candidate list, the legacy single binding
+  // only while no list was ever saved, plus a signed-in vendor account's image
+  // model — now lives in the shared helper, pinned by image-generation-default.test.mjs.
+  assert.ok(imageModelRowSource.includes("imageGenerationPickerCandidates("));
   assert.match(imageModelRowSource, /if \(!options\.some\(\(option\) => !option\.disabled\)\) return null;/);
   assert.match(imageModelRowSource, /if \(candidates\.length === 0\) return null;/);
   assert.match(imageModelRowSource, /imageModelUnavailable/);
@@ -181,7 +184,7 @@ test("the published record is not shaped by the stored override", () => {
   // the binding to it would make an override its own justification.
   assert.match(
     mainSource,
-    /modalities: catalogModelConfig\.modalities \?\? \{ input: \["text"\], output: \["text"\] \}/,
+    /modalities: operationMetadata\?\.modalities \?\? catalogModelConfig\.modalities \?\? \{ input: \["text"\], output: \["text"\] \}/,
   );
   const decorate = mainSource.slice(
     mainSource.indexOf("const decorate ="),
@@ -225,12 +228,9 @@ test("a model the catalog does not describe still reports its binding overrides"
   for (const block of [providerBlock, sessionBlock]) {
     assert.match(block, /modelConfigWithBinding\(/);
     assert.match(block, /catalogModelConfigFor\(modelsDevCatalog/);
-    assert.match(block, /bindingForModel\(provider, modelId\)/);
+    assert.match(block, /providerId: provider.id/);
   }
-  assert.doesNotMatch(
-    providerCatalogSource,
-    /const modelConfig = catalogModelConfig\s*\n\s*\? modelConfigWithBinding/,
-  );
+  assert.match(providerCatalogSource, /resolveBindingLimits\(catalogConfig, binding\)/);
 });
 
 test("the advanced body is a compact sheet without helper paragraphs", () => {

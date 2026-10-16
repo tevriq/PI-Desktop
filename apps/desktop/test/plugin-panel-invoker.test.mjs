@@ -5,8 +5,16 @@ import test from "node:test";
 
 register(new URL("./helpers/ts-import-hooks.mjs", import.meta.url));
 
-const { PanelSenders, PLUGIN_PAGE_CLOSE_SETTLE_MS, pageGoneWithin, resolvePanelInvocation } =
-  await import("../electron/main/plugin-panel-senders.ts");
+const {
+  PanelOperationSerializer,
+  PanelSenders,
+  PLUGIN_PANEL_LOAD_SETTLE_MS,
+  PLUGIN_PAGE_CLOSE_SETTLE_MS,
+  pageGoneWithin,
+  panelReadyWithin,
+  resolvePanelInvocation,
+  teardownPanelWindow,
+} = await import("../electron/main/plugin-panel-senders.ts");
 
 const panelHostSource = await readFile(
   new URL("../electron/main/plugin-panel-host.ts", import.meta.url),
@@ -135,7 +143,7 @@ test(
 test("panel windows and docked views bind bridge identity to the page", () => {
   assert.match(
     panelHostSource,
-    /import \{ PanelSenders, pageGoneWithin, resolvePanelInvocation \} from "\.\/plugin-panel-senders"/,
+    /import \{[^}]*\bPanelSenders\b[^}]*\bpageGoneWithin\b[^}]*\bresolvePanelInvocation\b[^}]*\} from "\.\/plugin-panel-senders"/,
   );
   assert.match(panelHostSource, /private senders = new PanelSenders\(\)/);
   // Registered before the document loads, released with the page — not with the
@@ -201,5 +209,168 @@ test("the bridge settles a call from a page that is gone", () => {
   assert.match(
     panelHostSource,
     /if \(!window\) \{[\s\S]*?if \(event\.sender\.isDestroyed\(\)\) return;[\s\S]*?throw new Error\("invalid panel window control invoker"\)/,
+  );
+});
+
+test("PanelOperationSerializer serializes operations on the same plugin ID", async () => {
+  const serializer = new PanelOperationSerializer();
+  const events = [];
+  let unblockFirst;
+  const firstBlock = new Promise((resolve) => {
+    unblockFirst = resolve;
+  });
+
+  const op1 = serializer.run("plugin.a", async () => {
+    events.push("op1:start");
+    await firstBlock;
+    events.push("op1:end");
+    return "result-1";
+  });
+
+  const op2 = serializer.run("plugin.a", async () => {
+    events.push("op2:start");
+    events.push("op2:end");
+    return "result-2";
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["op1:start"], "op2 must not start while op1 is pending");
+
+  unblockFirst();
+  const [res1, res2] = await Promise.all([op1, op2]);
+  assert.equal(res1, "result-1");
+  assert.equal(res2, "result-2");
+  assert.deepEqual(events, ["op1:start", "op1:end", "op2:start", "op2:end"]);
+});
+
+test("PanelOperationSerializer runs operations for different plugins concurrently", async () => {
+  const serializer = new PanelOperationSerializer();
+  const events = [];
+  let unblockA;
+  const blockA = new Promise((resolve) => {
+    unblockA = resolve;
+  });
+
+  const opA = serializer.run("plugin.a", async () => {
+    events.push("a:start");
+    await blockA;
+    events.push("a:end");
+  });
+
+  const opB = serializer.run("plugin.b", async () => {
+    events.push("b:start");
+    events.push("b:end");
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(events.includes("b:start"), "opB must not be blocked by opA");
+  assert.ok(events.includes("b:end"), "opB completes while opA is blocked");
+
+  unblockA();
+  await opA;
+  await opB;
+});
+
+test("PanelOperationSerializer continues processing after an operation failure", async () => {
+  const serializer = new PanelOperationSerializer();
+  const failed = serializer.run("plugin.a", async () => {
+    throw new Error("failure");
+  });
+  await assert.rejects(failed, /failure/);
+
+  const next = await serializer.run("plugin.a", async () => "recovered");
+  assert.equal(next, "recovered");
+});
+
+test("teardownPanelWindow forces destruction when a page refuses to close", async () => {
+  const page = fakePage();
+  let closed = false;
+  let destroyed = false;
+  const win = {
+    close() {
+      closed = true;
+    },
+    destroy() {
+      destroyed = true;
+      page.die();
+    },
+    isDestroyed() {
+      return destroyed;
+    },
+    webContents: page,
+  };
+
+  // The page never dies on win.close(), simulating beforeunload refusing close.
+  await teardownPanelWindow(win, { force: true, budgetMs: 20 });
+  assert.equal(closed, true, "win.close() must be called first");
+  assert.equal(destroyed, true, "win.destroy() must be called when force is true");
+  assert.equal(win.isDestroyed(), true);
+});
+
+test("teardownPanelWindow leaves window registered when not forced and page refuses close", async () => {
+  const page = fakePage();
+  let closed = false;
+  let destroyed = false;
+  const win = {
+    close() {
+      closed = true;
+    },
+    destroy() {
+      destroyed = true;
+      page.die();
+    },
+    isDestroyed() {
+      return destroyed;
+    },
+    webContents: page,
+  };
+
+  await teardownPanelWindow(win, { force: false, budgetMs: 20 });
+  assert.equal(closed, true, "win.close() was called");
+  assert.equal(destroyed, false, "win.destroy() was not called without force");
+  assert.equal(win.isDestroyed(), false);
+});
+
+test("a panel page that never settles still fails the open request (#998)", async () => {
+  // The window is hidden until the page loads: a hang must become an error the
+  // asking page can show, not a click that does nothing.
+  const hang = new Promise(() => undefined);
+  await assert.rejects(
+    panelReadyWithin(hang, "demo.plugin", 40),
+    /PANEL_LOAD_TIMEOUT: the panel page of demo\.plugin did not report ready within 0s/,
+  );
+});
+
+test("a panel page that loads before its budget shows normally", async () => {
+  await panelReadyWithin(Promise.resolve("loaded"), "demo.plugin", 5_000);
+});
+
+test("a panel page that fails its own load keeps the original error", async () => {
+  await assert.rejects(
+    panelReadyWithin(
+      Promise.reject(new Error("ERR_FILE_NOT_FOUND: views/panel.html")),
+      "demo.plugin",
+      5_000,
+    ),
+    /ERR_FILE_NOT_FOUND/,
+  );
+});
+
+test("the panel load budget is a generous, seconds-scale default", () => {
+  assert.equal(PLUGIN_PANEL_LOAD_SETTLE_MS, 15_000);
+});
+
+test("the open path races the page load against that budget (#998)", () => {
+  const open = panelHostSource.slice(
+    panelHostSource.indexOf("async open(request: PluginPanelOpenRequest)"),
+    panelHostSource.indexOf("async close(pluginId"),
+  );
+  assert.ok(open.length > 0);
+  assert.match(open, /await panelReadyWithin\(\s*win\.loadURL\(/);
+  // The timeout error surfaces through the open path's own `catch`, which
+  // destroys the hidden window before the rejection reaches the click.
+  assert.match(
+    open,
+    /\} catch \(error\) \{\s*if \(!win\.isDestroyed\(\)\) \{\s*win\.destroy\(\);/,
   );
 });

@@ -393,6 +393,57 @@ test("a remote MCP tool can run longer than the connection timeout", async (t) =
   const result = await client.callTool("slow", {});
   assert.equal(describeMcpContent(result.content), "finished");
 });
+test("an SSE reply is dispatched before the server closes the stream", async (t) => {
+  // A streamable-HTTP server may answer immediately and still hold the body
+  // open — gitmcp.io replies in ~2s and ends the stream ~12s later. Waiting for
+  // the body to end used to spend the whole connect budget on that gap.
+  const encoder = new TextEncoder();
+  let closeStream;
+  const keepOpen = new Promise((resolve) => {
+    closeStream = resolve;
+  });
+  const fetchImpl = async (_url, options) => {
+    const message = JSON.parse(options.body);
+    if (message.method === "notifications/initialized") {
+      return new Response(null, { status: 202 });
+    }
+    const result =
+      message.method === "initialize"
+        ? { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {} }
+        : { tools: [{ name: "streamed" }] };
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n\n`,
+          ),
+        );
+        void keepOpen.then(() => controller.close());
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+  const client = new McpServerClient({
+    rootPath: mkdtempSync(join(tmpdir(), "pi-mcp-sse-")),
+    server: { id: "streaming", transport: "http", url: "https://streaming.example/mcp" },
+    values: {},
+    connectTimeoutMs: 500,
+    discoveryTimeoutMs: 500,
+    fetchImpl,
+  });
+  t.after(() => {
+    closeStream();
+    client.close();
+  });
+
+  assert.deepEqual(
+    (await client.connect()).map((tool) => tool.name),
+    ["streamed"],
+  );
+});
 test("aborting one HTTP MCP call cancels its request", async (t) => {
   let callStarted;
   let cancellationReceived;
@@ -436,6 +487,53 @@ test("aborting one HTTP MCP call cancels its request", async (t) => {
   controller.abort();
   await assert.rejects(call, { code: "TOOL_ABORTED" });
   assert.equal(await canceled, callId);
+});
+
+test("a timed-out MCP call tells the server to stop the request", async (t) => {
+  // The MCP lifecycle spec asks the sender to issue notifications/cancelled
+  // when it gives up on a request; otherwise the server keeps running a tool
+  // whose result nobody will read, and a model retry runs it a second time.
+  let cancellationReceived;
+  const canceled = new Promise((resolve) => { cancellationReceived = resolve; });
+  let callId;
+  const fetchImpl = async (_url, options) => {
+    const message = JSON.parse(options.body);
+    if (message.method === "notifications/initialized") return new Response(null, { status: 202 });
+    if (message.method === "notifications/cancelled") {
+      cancellationReceived(message.params);
+      return new Response(null, { status: 202 });
+    }
+    if (message.method === "tools/call") {
+      callId = message.id;
+      return new Promise((_, reject) => {
+        options.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    }
+    const result = message.method === "initialize"
+      ? { protocolVersion: message.params.protocolVersion, capabilities: {} }
+      : { tools: [{ name: "slow" }] };
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const client = new McpServerClient({
+    rootPath: mkdtempSync(join(tmpdir(), "pi-mcp-timeout-")),
+    server: { id: "remote", transport: "http", url: "https://mcp.example.com/mcp" },
+    values: {},
+    callTimeoutMs: 50,
+    fetchImpl,
+  });
+  t.after(() => client.close());
+  await client.connect();
+
+  await assert.rejects(client.callTool("slow", {}), { code: "TIMEOUT" });
+  const params = await Promise.race([
+    canceled,
+    new Promise((resolve) => setTimeout(() => resolve("no cancellation"), 500)),
+  ]);
+  assert.notEqual(params, "no cancellation");
+  assert.equal(params.requestId, callId);
 });
 
 test("aborting a tool waiting for a shared handshake does not send tools/call", async (t) => {

@@ -11,11 +11,14 @@ import {
   DEFAULT_NETWORK_PROXY_BYPASS,
   isRelaxedNetworkPolicy,
   parseProxyUrl,
+  resolveCustomProxyUrl,
+  settingsForInactiveProxyMode,
   validateNetworkProxy,
 } from "@pi-desktop/shared";
 import { api } from "../../lib/api";
 import { Button, Input, SegmentedControl, SettingsToggle, cx } from "../ui";
 import { SettingsRow } from "../../features/settings/primitives";
+import { useAppStore } from "../../stores/app-store";
 
 const MODES: NetworkProxyMode[] = ["system", "direct", "custom"];
 
@@ -37,7 +40,7 @@ export function NetworkProxySection({
     saved.bypass ?? DEFAULT_NETWORK_PROXY_BYPASS,
   );
   const [urlError, setUrlError] = useState(false);
-  const [saveError, setSaveError] = useState(false);
+  const showToast = useAppStore((state) => state.showToast);
   const [testState, setTestState] = useState<"idle" | "busy" | "ok" | "fail">(
     "idle",
   );
@@ -56,11 +59,10 @@ export function NetworkProxySection({
       return;
     }
     setUrlError(false);
-    setSaveError(false);
     try {
       await saveSettings({ networkProxy: validated.value });
     } catch {
-      setSaveError(true);
+      showToast(t("settings.proxySaveError"), { variant: "error" });
     }
   };
 
@@ -68,15 +70,20 @@ export function NetworkProxySection({
     if (mode === saved.mode) return;
     setTestState("idle");
     if (mode !== "custom") {
-      void persist({ mode });
+      // Blur can start an async save, so read the current drafts here instead
+      // of relying on `saved` to have refreshed before this click completes.
+      void persist(
+        settingsForInactiveProxyMode(mode, saved, urlDraft, bypassDraft),
+      );
       return;
     }
-    const parsed = parseProxyUrl(urlDraft);
-    const url = parsed.ok ? parsed.value.href : "socks5://127.0.0.1:1080";
-    if (!parsed.ok) setUrlDraft(url);
+    // A stale invalid draft loses to the remembered proxy: restoring the
+    // user's own URL on re-entry is the whole point of remembering it.
+    const resolved = resolveCustomProxyUrl(urlDraft, saved.url);
+    if (!resolved.fromDraft) setUrlDraft(resolved.url);
     void persist({
       mode: "custom",
-      url,
+      url: resolved.url,
       bypass: bypassDraft.trim() || undefined,
     });
   };
@@ -149,7 +156,6 @@ export function NetworkProxySection({
    * mode is the only thing this switch changes.
    */
   const persistNetworkPolicy = async (mode: NetworkPolicyMode) => {
-    setSaveError(false);
     const next: NetworkPolicySettings = { mode };
     if (settings.networkPolicy?.insecureNoticeAcknowledged === true) {
       next.insecureNoticeAcknowledged = true;
@@ -157,7 +163,7 @@ export function NetworkProxySection({
     try {
       await saveSettings({ networkPolicy: next });
     } catch {
-      setSaveError(true);
+      showToast(t("settings.proxySaveError"), { variant: "error" });
     }
   };
 
@@ -265,11 +271,6 @@ export function NetworkProxySection({
           </>
         ) : null}
 
-        {saveError ? (
-          <span className="settings-command-shell-state error" role="status">
-            {t("settings.proxySaveError")}
-          </span>
-        ) : null}
       </div>
     </section>
   );

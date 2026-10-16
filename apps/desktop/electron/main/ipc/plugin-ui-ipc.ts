@@ -10,6 +10,7 @@ import { PluginViewHost, pluginViewKey } from "../plugin-view-host";
 import { PluginPanelHost } from "../plugin-panel-host";
 import type { PluginPanelTheme } from "../../shared/plugin-panel-chrome";
 import type { IpcRegistrar } from "./types";
+import { pluginProviderCatalogEntries } from "../plugin-provider-catalog";
 
 export type PluginUiIpcDependencies = {
   registrar: IpcRegistrar;
@@ -211,6 +212,7 @@ export function registerPluginUiIpc({
         theme: getPluginPanelTheme(),
         htmlPath,
         netDomains: loaded.manifest.net?.domains?.map((domain) => String(domain)),
+        netAnyHost: loaded.permissions.has("net.anyHost"),
         // The browser view owns an address bar and its own history, so its
         // location keeps going through `browserHost`; every other contributed
         // view receives the opener's subject untouched (D320 follow-up).
@@ -274,6 +276,13 @@ export function registerPluginUiIpc({
   // resolves. Project scope governs what a plugin may *do* in a project, not
   // how the app looks.
   handle(IPC.invoke.pluginThemes, async () => plugins.getThemes());
+
+  // Add Service offers only API-key rows that are declared by a loaded plugin
+  // with the existing provider.register grant. The credential is still entered
+  // and stored by the Host's provider path.
+  handle(IPC.invoke.pluginProviderCatalog, async () =>
+    pluginProviderCatalogEntries(plugins.listLoaded(), getUpdaterLocale()),
+  );
 
   // Resident service supervision state; refreshed on the pluginChanged event.
   handle(IPC.invoke.pluginServices, async () => plugins.getServiceStates());

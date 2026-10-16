@@ -1,3 +1,4 @@
+import { parseMcpServerIds, parseMcpToolNames } from "./mcp-tool-selection.js";
 /**
  * Node pi agent sidecar.
  * Protocol: NDJSON JSON-RPC on stdio with Electron main.
@@ -25,8 +26,10 @@ import {
   normalizeSupportedThinkingLevels,
   normalizeThinkingLevel,
 } from "./sidecar-config.js";
+import { matchesExpectedTurnId } from "./turn-target.js";
 import { applyNodeNetworkProxy } from "./node-proxy.js";
-import { NATIVE_PI_SESSION_PREFIX, nativePiService } from "./native-pi-session.js";
+import { applyAdditiveDefaultCaCertificates } from "./system-ca.js";
+import { NATIVE_PI_SESSION_PREFIX } from "./native-pi-session-id.js";
 import {
   isCommandShellOption,
   normalizeMode,
@@ -48,6 +51,16 @@ import type {
 } from "@pi-desktop/shared";
 
 type RuntimeMap = Map<string, DesktopAgentRuntime>;
+
+type NativePiServiceFactory = typeof import("./native-pi-session.js")["nativePiService"];
+let nativePiServiceFactory: NativePiServiceFactory | undefined;
+
+async function getNativePiService() {
+  if (!nativePiServiceFactory) {
+    nativePiServiceFactory = (await import("./native-pi-session.js")).nativePiService;
+  }
+  return nativePiServiceFactory();
+}
 
 const runtimes: RuntimeMap = new Map();
 const hostProxy = new ParentHostProxy();
@@ -93,6 +106,8 @@ type RuntimeParams = {
   turnId?: string;
   thinkingLevel?: SessionThinkingLevel;
   infiniteProviderRetry?: boolean;
+  /** Opt-in TypeSafe classifier credential resolved by Electron main. */
+  jevApiKey?: string;
   provider: RuntimeProviderConfig;
   commandShell: CommandShellOption;
   pluginTools?: PluginToolDef[];
@@ -108,6 +123,9 @@ type RuntimeParams = {
   scratchDir?: string;
   /** Session-bound workspace root supplied by Electron main. */
   projectPath?: string;
+  remoteWorkspace?: { hostKey: string; path: string };
+  /** An isolated session's worktree root, supplied by Electron main (ADR 0329). */
+  workspaceRoot?: string;
   customSystemPrompt?: CustomSystemPrompt;
   projectInstructions?: ProjectInstructions;
   projectMemory?: string;
@@ -216,10 +234,13 @@ async function runtimeFor(
     subagents,
     subagentProviders,
     subagentModelKeys,
+    jevApiKey: params.jevApiKey,
     projectInstructions: params.projectInstructions,
     customSystemPrompt: params.customSystemPrompt,
     projectMemory: params.projectMemory,
     projectPath: params.projectPath,
+    remoteWorkspace: params.remoteWorkspace,
+    workspaceRoot: params.workspaceRoot,
     commandShell: params.commandShell,
   })
     ? existing
@@ -229,6 +250,7 @@ async function runtimeFor(
     runtimes.delete(sessionId);
   }
   if (reusable) {
+    reusable.setPluginSkills(pluginSkills);
     reusable.setCompactionSettings(params.compactionSettings);
     reusable.setInfiniteProviderRetry(params.infiniteProviderRetry === true);
     reusable.setMode(mode);
@@ -248,15 +270,14 @@ async function runtimeFor(
     // The current prompt is sent separately below. Exclude its persisted row
     // before attachment hydration so it cannot consume the history byte budget.
     if (currentPrompt !== undefined && params.userMessageId) {
-      const last = restoredMessages.at(-1);
-      if (last?.role === "user" && last.id === params.userMessageId) {
-        restoredMessages = restoredMessages.slice(0, -1);
-      }
+      restoredMessages = restoredMessages.filter((message) =>
+        message.role !== "user" || message.id !== params.userMessageId,
+      );
     }
     const supportsVision = visionFromModelConfig(params.provider.modelConfig);
     history = await hydrateAttachmentHistory(restoredMessages, {
       scratchDir: params.scratchDir,
-      projectPath: params.projectPath,
+      projectPath: params.remoteWorkspace ? undefined : params.projectPath,
       attachmentsDir: params.attachmentsDir,
       supportsVision,
     });
@@ -280,6 +301,7 @@ async function runtimeFor(
     commandShell: params.commandShell,
     thinkingLevel,
     infiniteProviderRetry: params.infiniteProviderRetry === true,
+    jevApiKey: params.jevApiKey,
     history,
     compaction,
     compactionSettings: params.compactionSettings,
@@ -290,6 +312,8 @@ async function runtimeFor(
     subagentProviders,
     subagentModelKeys,
     projectPath: params.projectPath,
+    remoteWorkspace: params.remoteWorkspace,
+    workspaceRoot: params.workspaceRoot,
     customSystemPrompt: params.customSystemPrompt,
     projectInstructions: params.projectInstructions,
     projectMemory: params.projectMemory,
@@ -298,6 +322,7 @@ async function runtimeFor(
         ? params.scratchDir
         : undefined,
     onEvent: (envelope: AgentEventEnvelope) => notify("agent.event", envelope),
+    onDiagnostic: (diagnostic) => notify("agent.diagnostic", diagnostic),
   });
   runtimes.set(sessionId, runtime);
   // Load failures are diagnostics, never a failed prompt (spec 16 §4.4).
@@ -357,34 +382,48 @@ async function handle(method: string, params: any): Promise<unknown> {
     case "sidecar.configure": {
       // Main owns host-core; sidecar only keeps config metadata.
       if (params && typeof params === "object" && "networkProxy" in params) {
-        applyNodeNetworkProxy(normalizeNetworkProxy(params.networkProxy));
+        applyNodeNetworkProxy(
+          normalizeNetworkProxy(params.networkProxy),
+          process.env,
+          typeof params.systemProxyRelayUrl === "string"
+            ? params.systemProxyRelayUrl
+            : undefined,
+        );
       }
       return { ok: true, mode: "host-proxy" };
     }
     case "sidecar.health":
       return { ok: true, runtimes: runtimes.size };
-    case "native.session.list":
-      return { sessions: await nativePiService().list() };
-    case "native.session.search":
-      return nativePiService().search(String(params.query ?? ""));
-    case "native.session.get":
+    case "native.session.list": {
+      const service = await getNativePiService();
+      return { sessions: await service.list() };
+    }
+    case "native.session.search": {
+      const service = await getNativePiService();
+      return service.search(String(params.query ?? ""));
+    }
+    case "native.session.get": {
+      const service = await getNativePiService();
       return {
-        session: nativePiService().detail(String(params.id ?? ""), {
+        session: service.detail(String(params.id ?? ""), {
           messageBefore: params.messageBefore,
           messageLimit: params.messageLimit,
           messageAround: params.messageAround,
           contentLimit: params.contentLimit,
         }),
       };
-    case "native.session.fork":
+    }
+    case "native.session.fork": {
+      const service = await getNativePiService();
       return {
-        session: nativePiService().fork({
+        session: service.fork({
           id: String(params.id ?? ""),
           title: typeof params.title === "string" ? params.title : undefined,
           throughMessageId:
             typeof params.throughMessageId === "string" ? params.throughMessageId : undefined,
         }),
       };
+    }
     case "agent.testRuntimeIdentity": {
       return testRuntimeIdentity(String(params.sessionId ?? ""));
     }
@@ -392,7 +431,8 @@ async function handle(method: string, params: any): Promise<unknown> {
       const sessionId = String(params.sessionId);
       const content = String(params.content ?? "");
       if (sessionId.startsWith(NATIVE_PI_SESSION_PREFIX)) {
-        return nativePiService().prompt(sessionId, content, (envelope) =>
+        const service = await getNativePiService();
+        return service.prompt(sessionId, content, (envelope) =>
           notify("native.agent.event", envelope),
           typeof params.userMessageId === "string" ? params.userMessageId : undefined,
         );
@@ -422,6 +462,8 @@ async function handle(method: string, params: any): Promise<unknown> {
       }
       const prompt: RuntimePrompt = {
         text: content,
+        mcpServerIds: parseMcpServerIds(params.mcpServerIds),
+        mcpToolNames: parseMcpToolNames(params.mcpToolNames),
         attachments,
         ...(params.sessionMessage ? { sessionMessage: params.sessionMessage as SessionMessageOrigin } : {}),
       };
@@ -450,7 +492,7 @@ async function handle(method: string, params: any): Promise<unknown> {
       const expectedTurnId = String(params.expectedTurnId ?? "");
       if (method === "agent.steeringContext") return runtime.steeringContext(expectedTurnId);
       return runtime.steer(
-        { text: String(params.content ?? ""), attachments: params.attachments },
+        { text: String(params.content ?? ""), attachments: params.attachments, mcpServerIds: parseMcpServerIds(params.mcpServerIds), mcpToolNames: parseMcpToolNames(params.mcpToolNames) },
         expectedTurnId,
         params.message,
       );
@@ -490,24 +532,38 @@ async function handle(method: string, params: any): Promise<unknown> {
     }
     case "agent.abort": {
       const sessionId = String(params.sessionId);
+      const turnId = typeof params.turnId === "string" ? params.turnId : undefined;
       if (sessionId.startsWith(NATIVE_PI_SESSION_PREFIX)) {
-        return nativePiService().abort(sessionId);
+        return (await getNativePiService()).abort(sessionId, turnId);
       }
       const runtime = runtimes.get(sessionId);
-      const turnId = typeof params.turnId === "string" ? params.turnId : undefined;
-      if (turnId && runtime?.getStatus().currentTurnId !== turnId) return { ok: false, aborted: false };
+      if (!matchesExpectedTurnId(runtime?.getStatus().currentTurnId, turnId)) return { ok: false, aborted: false };
       await hostProxy.call("plans.abort", { sessionId, ...(turnId ? { turnId } : {}) }).catch(() => undefined);
-      if (runtime && runtimes.get(sessionId) === runtime && (!turnId || runtime.getStatus().currentTurnId === turnId)) {
+      if (runtime && runtimes.get(sessionId) === runtime && matchesExpectedTurnId(runtime.getStatus().currentTurnId, turnId)) {
         await runtime.abort();
       }
       return { ok: true };
     }
+    case "agent.stopSubagents": {
+      const runtime = runtimes.get(String(params.sessionId));
+      if (!runtime) throw new Error("No active runtime for this session");
+      const ids = params.delegationIds;
+      if (ids !== undefined && (!Array.isArray(ids) || ids.length === 0 || ids.length > 100 || ids.some(id => typeof id !== "string" || !id.trim()))) {
+        throw new Error("Invalid delegation IDs");
+      }
+      const result = await runtime.stopSubagents(ids as string[] | undefined);
+      return { pending: result.details.stopPending?.flatMap(record => typeof record.delegationId === "string" ? [record.delegationId] : []) ?? [] };
+    }
     case "agent.stop": {
       const sessionId = String(params.sessionId);
+      const turnId = typeof params.turnId === "string" ? params.turnId : undefined;
       if (sessionId.startsWith(NATIVE_PI_SESSION_PREFIX)) {
-        return nativePiService().abort(sessionId);
+        return (await getNativePiService()).abort(sessionId, turnId);
       }
       const runtime = runtimes.get(sessionId);
+      if (!matchesExpectedTurnId(runtime?.getStatus().currentTurnId, turnId)) {
+        return { requested: false };
+      }
       return runtime?.requestGracefulStop() ?? { requested: false };
     }
     case "asktool.resolve": {
@@ -537,7 +593,7 @@ async function handle(method: string, params: any): Promise<unknown> {
     case "agent.getStatus": {
       const sessionId = String(params.sessionId);
       if (sessionId.startsWith(NATIVE_PI_SESSION_PREFIX)) {
-        return nativePiService().status(sessionId);
+        return (await getNativePiService()).status(sessionId);
       }
       const runtime = runtimes.get(sessionId);
       return {
@@ -551,7 +607,7 @@ async function handle(method: string, params: any): Promise<unknown> {
     case "agent.disposeSession": {
       const sessionId = String(params.sessionId);
       if (sessionId.startsWith(NATIVE_PI_SESSION_PREFIX)) {
-        nativePiService().dispose(sessionId);
+        (await getNativePiService()).dispose(sessionId);
         return { ok: true };
       }
       const runtime = runtimes.get(sessionId);
@@ -604,7 +660,9 @@ readNdjsonLines(process.stdin, async (line) => {
 // host call) must not take every session's runtime down with it: Node's
 // default for `unhandledRejection` is to exit the process. Log and carry on;
 // the affected session surfaces its own error through the normal event path.
-process.on("exit", () => nativePiService().disposeAll());
+process.on("exit", () => {
+  nativePiServiceFactory?.().disposeAll();
+});
 
 process.on("unhandledRejection", (reason) => {
   const detail =
@@ -622,4 +680,7 @@ if (bootProxy) {
     // Invalid boot payload is ignored; sidecar.configure will replace it.
   }
 }
+// The default TLS context is configured before any provider request can be
+// issued, so the merged CA set covers every transport this sidecar builds.
+applyAdditiveDefaultCaCertificates();
 process.stderr.write("[agent-sidecar] ready (host-proxy mode)\n");

@@ -5,7 +5,9 @@ const {
   FILE_MANAGER_PLUGIN_TAB,
   activateWorkPanelTabState,
   browserPluginTab,
+  browserPluginTabForReveal,
   closeWorkPanelTabState,
+  createWorkPanelFileRequest,
   emptyWorkPanelContext,
   fileWorkPanelTab,
   hasPluginView,
@@ -72,6 +74,16 @@ test("selecting an already-open tool removes only the source launcher tab", () =
   assert.equal(replaced.activeTabId, browser.id);
 });
 
+test("Browser reveal reuses the originating session's browser tab", () => {
+  const first = browserPluginTab("https://example.com/first");
+  const latest = browserPluginTab("https://example.com/latest");
+  const tabs = [first, toolWorkPanelTab("review"), latest];
+
+  assert.equal(browserPluginTabForReveal(tabs, "review", first.id), first);
+  assert.equal(browserPluginTabForReveal(tabs, latest.id), latest);
+  assert.equal(browserPluginTabForReveal([], null).id, browserPluginTab().id);
+});
+
 test("file tabs normalize lexical paths and remain distinct by resource", () => {
   const first = fileWorkPanelTab("src\\App.tsx");
   const equivalent = fileWorkPanelTab("./src//components/../App.tsx");
@@ -82,6 +94,22 @@ test("file tabs normalize lexical paths and remain distinct by resource", () => 
   assert.notEqual(first.id, second.id);
   assert.equal(normalizeWorkPanelFilePath("../src/../App.tsx"), "../App.tsx");
   assert.equal(normalizeWorkPanelFilePath("/repo/./src/../App.tsx"), "/repo/App.tsx");
+});
+
+test("file-view requests preserve a positioned file tab", () => {
+  const tab = fileWorkPanelTab("src/App.tsx", "text/typescript", {
+    line: 65,
+    column: 4,
+  });
+
+  assert.deepEqual(createWorkPanelFileRequest(tab, 7), {
+    path: "src/App.tsx",
+    seq: 7,
+    mimeType: "text/typescript",
+    line: 65,
+    column: 4,
+  });
+  assert.equal(createWorkPanelFileRequest(toolWorkPanelTab("review"), 8), null);
 });
 
 test("closing the active tab selects its right neighbor then its left", () => {
